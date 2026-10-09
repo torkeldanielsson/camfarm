@@ -158,7 +158,7 @@ dependencies = [
 
 [[package]]
 name = "camcheck"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -171,7 +171,7 @@ dependencies = [
 
 [[package]]
 name = "camfarm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -317,7 +317,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "framecode"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "futures-channel"
