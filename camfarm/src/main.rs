@@ -44,7 +44,7 @@ enum Phase {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "camfarm", about = "Synthetic RTSP cameras with a frame identity code")]
+#[command(name = "camfarm", version, about = "Synthetic RTSP cameras with a frame identity code")]
 struct Args {
     #[arg(long, default_value_t = 32)]
     cameras: u32,

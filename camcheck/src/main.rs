@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
-#[command(name = "camcheck", about = "Check camfarm frame codes from RTSP, GStreamer CUDA IPC exports or a recorded grid")]
+#[command(name = "camcheck", version, about = "Check camfarm frame codes from RTSP, GStreamer CUDA IPC exports or a recorded grid")]
 struct Args {
     #[command(subcommand)]
     mode: Mode,
