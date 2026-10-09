@@ -14,6 +14,11 @@ a video pipeline.
 Use it to test camera ingest, transcoding and composition pipelines with realistic, verifiable input: you know every
 frame that was produced, so you can tell exactly what the pipeline delivered and how late.
 
+![Four cameras from one camfarm instance](docs/images/four-cameras.jpg)
+
+*Four cameras from one camfarm instance. Every camera has its own colours and motion; the black and white band at
+the top of each picture is the frame code.*
+
 ## The frame code
 
 The top tenth of every picture is a band of 3 x 40 black or white cells. Cell size follows the picture size
@@ -29,8 +34,50 @@ central half.
 | 96..112  | CRC-16/CCITT-FALSE of the payload                         |
 | 112..120 | sync pattern 01010011                                     |
 
+![The frame code band of one 1280x720 picture](docs/images/band-720p-h264-646kbps.png)
+
+A reader takes the mean of the central half of each cell, sets the threshold halfway between the black and white
+sync cells, and accepts the picture only if both sync patterns match and the CRC is right. Anything else counts as
+unreadable, never as a wrong frame.
+
 Below the band: an animated noise field, drifting discs and per-pixel white noise. `--noise` sets the white noise
 amplitude, which decides how many bits an encoder needs.
+
+## How the code survives compression
+
+To test this, one camera was recorded (12 s, 181 pictures, 1280x720 at 15 fps). The recording was then re-encoded
+at five sizes, with H.264 and H.265 from 1000 kbit/s down to 30 kbit/s and MJPEG from quality 2 down to 31, and every
+picture was read back with `camcheck grid`.
+
+![Readable pictures against bitrate](docs/images/robustness.svg)
+
+- **H.264:** at 720p, every picture is readable down to about 110 kbit/s. At 540p, every picture is readable down to
+  about 50 kbit/s.
+- **H.265:** at 720p, every picture is readable at 46 kbit/s; the encoder would not go lower, and at its lowest
+  setting 179 of 181 pictures were readable. At 540p, every picture is readable down to about 50 kbit/s.
+- **360p and smaller (cells down to 8 x 6 pixels):** every picture is readable at every bitrate tested, down to
+  30 kbit/s.
+- **MJPEG:** every picture is readable at every quality and size, including quality 31.
+- **Wrong reads:** none. Every picture camcheck accepted carried the right camera id. Damaged pictures fail the sync
+  or CRC check and are counted as unreadable.
+
+Blur and ringing do not break the code. It fails when the rate control runs out of bits, stops updating parts of
+the picture, and leaves cells from an earlier frame behind:
+
+| code band | result |
+|---|---|
+| ![](docs/images/band-720p-h264-113kbps.png) | 720p H.264, 113 kbit/s: readable |
+| ![](docs/images/band-720p-mjpeg-q31.png) | 720p MJPEG, quality 31: readable |
+| ![](docs/images/band-180p-h264-32kbps.png) | 180p H.264, 32 kbit/s (enlarged): readable |
+| ![](docs/images/band-720p-h264-57kbps-bad.png) | 720p H.264, 57 kbit/s: half-updated cells, rejected by the CRC |
+| ![](docs/images/band-540p-h265-38kbps-bad.png) | 540p H.265, 38 kbit/s (enlarged): stale and smeared cells, rejected |
+
+A real 720p camera stream runs at 1-15 Mbit/s, ten to a hundred times above where the code starts to fail. A
+pipeline that scales cameras down to small tiles before encoding also keeps the code readable. The re-encodes used
+ffmpeg's libx264 and libx265 (preset medium, constant bitrate with a 1 s buffer, no B-frames). Other encoders will
+differ, so run [docs/robustness.sh](docs/robustness.sh) on a recording of your own; it writes
+[docs/robustness.csv](docs/robustness.csv), and [docs/robustness_chart.py](docs/robustness_chart.py) draws the
+chart.
 
 ## Install
 
@@ -114,10 +161,44 @@ synchronized clocks (NTP or PTP); with chrony on a LAN expect well under a milli
 GStreamer's CUDA library (GStreamer >= 1.24 for `cudaipcsrc`). All cameras are read in one pipeline, so they share
 one CUDA context.
 
+## Testing a pipeline end to end
+
+1. **Start the cameras** on the camera machine: `camfarm --cameras 32 ...` (see above). It prints one URL per camera
+   and, every few seconds, how many frames it pushed late or skipped. Both counts should stay at 0.
+2. **Check the cameras on their own.** From a machine on the same switch as the camera machine, run
+   `camcheck rtsp --url-base rtsp://<camera host>:8554/cam --count 32 --seconds 60`. Expect 100.000 % delivered and
+   nothing lost. If this check fails, fix the cameras or the network first; nothing downstream can be judged until it
+   passes.
+3. **Point the pipeline under test at the cameras**, at `rtsp://<camera host>:8554/cam01` and so on.
+4. **Check what the pipeline delivers**, at the far end:
+   - Use `camcheck cuda-ipc` when the pipeline hands out GStreamer CUDA IPC textures.
+   - Use `camcheck rtsp` when it serves RTSP again.
+   - Use `camcheck grid` on a recording when it composes the cameras into one video.
+5. **Read the result.** A clean run looks like this:
+
+```text
+ cam     fps distinct   lost   rep   back unread  wrong  deliv%   lat med   lat p95
+   1   15.00      300      0     0      0      0      0  100.00      22.9      23.4
+   2   15.00      300      0     0      0      0      0  100.00      22.9      23.3
+   ...
+ALL: 4 cameras, distinct 1200 of 1200 camera frames (100.000 %), lost 0, repeated 0, backwards 0, unreadable 0, wrong camera 0, latency median 22.9 ms p95 23.3 ms, worst camera 100.00 %
+```
+
+What the columns mean:
+
+- `lost`: frame numbers that never arrived.
+- `rep`: the same frame handed out again, as happens when a pipeline holds the last picture.
+- `back`: an older frame arriving after a newer one.
+- `unread`: pictures whose code could not be read.
+- `wrong`: a picture from another camera in this camera's slot.
+- `lat`: arrival time minus capture time.
+
+Frames lost in step 4 but not in step 2 were lost in the pipeline, or in the network between the camera machine and
+the pipeline. `--csv` writes one row per picture (camera, arrival time, frame number, capture time, read error) for
+your own analysis, and `--json` writes the summary.
+
 ## Testing advice
 
-- Verify the cameras with `camcheck rtsp` first, from a machine on the same switch as the camera host. Expect
-  100.000 % delivered and nothing lost.
 - Line-rate bursts (a large frame leaving a sender at 1 Gbit/s) can be dropped by switches with small buffers where
   traffic merges onto a 1 Gbit/s link, without any counter showing it. If a pipeline loses frames, test the network
   path on its own.

@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 358" width="760" height="358" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="12">
+<rect width="760" height="358" fill="#fcfcfb"/>
+<text x="48" y="18" font-size="14" font-weight="600" fill="#0b0b0b">Pictures with a readable code, after re-encoding at a lower bitrate</text>
+<rect x="48" y="30" width="12" height="12" rx="2" fill="#2a78d6"/><text x="65" y="40" fill="#52514e">720p</text>
+<rect x="106" y="30" width="12" height="12" rx="2" fill="#eb6834"/><text x="123" y="40" fill="#52514e">540p</text>
+<rect x="164" y="30" width="12" height="12" rx="2" fill="#1baf7a"/><text x="181" y="40" fill="#52514e">360p, 270p, 180p</text>
+<text x="213.0" y="76" text-anchor="middle" font-weight="600" fill="#0b0b0b">H.264</text>
+<line x1="48" x2="378" y1="314.0" y2="314.0" stroke="#e4e3df"/>
+<text x="42" y="318.0" text-anchor="end" fill="#52514e">0 %</text>
+<line x1="48" x2="378" y1="259.0" y2="259.0" stroke="#e4e3df"/>
+<text x="42" y="263.0" text-anchor="end" fill="#52514e">25 %</text>
+<line x1="48" x2="378" y1="204.0" y2="204.0" stroke="#e4e3df"/>
+<text x="42" y="208.0" text-anchor="end" fill="#52514e">50 %</text>
+<line x1="48" x2="378" y1="149.0" y2="149.0" stroke="#e4e3df"/>
+<text x="42" y="153.0" text-anchor="end" fill="#52514e">75 %</text>
+<line x1="48" x2="378" y1="94.0" y2="94.0" stroke="#e4e3df"/>
+<text x="42" y="98.0" text-anchor="end" fill="#52514e">100 %</text>
+<text x="60.5" y="330" text-anchor="middle" fill="#52514e">30</text>
+<text x="120.8" y="330" text-anchor="middle" fill="#52514e">60</text>
+<text x="184.7" y="330" text-anchor="middle" fill="#52514e">125</text>
+<text x="245.1" y="330" text-anchor="middle" fill="#52514e">250</text>
+<text x="305.5" y="330" text-anchor="middle" fill="#52514e">500</text>
+<text x="365.8" y="330" text-anchor="middle" fill="#52514e">1000</text>
+<line x1="48" x2="378" y1="314" y2="314" stroke="#8a8984"/>
+<text x="213.0" y="350" text-anchor="middle" fill="#52514e">kbit/s (log scale)</text>
+<path d="M57.5,94.0 L119.4,94.0 L181.9,94.0 L244.4,94.0 L306.2,94.0 L368.4,94.0" fill="none" stroke="#1baf7a" stroke-width="2"/>
+<circle cx="57.5" cy="94.0" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>H.264 360p, 270p, 180p: 29 kbit/s, 100 % readable</title></circle>
+<circle cx="119.4" cy="94.0" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>H.264 360p, 270p, 180p: 59 kbit/s, 100 % readable</title></circle>
+<circle cx="181.9" cy="94.0" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>H.264 360p, 270p, 180p: 121 kbit/s, 100 % readable</title></circle>
+<circle cx="244.4" cy="94.0" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>H.264 360p, 270p, 180p: 248 kbit/s, 100 % readable</title></circle>
+<circle cx="306.2" cy="94.0" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>H.264 360p, 270p, 180p: 504 kbit/s, 100 % readable</title></circle>
+<circle cx="368.4" cy="94.0" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>H.264 360p, 270p, 180p: 1030 kbit/s, 100 % readable</title></circle>
+<path d="M60.5,203.4 L110.0,94.0 L173.6,94.0 L220.3,94.0 L282.0,94.0 L363.0,94.0" fill="none" stroke="#eb6834" stroke-width="2"/>
+<circle cx="60.5" cy="203.4" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>H.264 540p: 30 kbit/s, 50 % readable</title></circle>
+<circle cx="110.0" cy="94.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>H.264 540p: 53 kbit/s, 100 % readable</title></circle>
+<circle cx="173.6" cy="94.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>H.264 540p: 110 kbit/s, 100 % readable</title></circle>
+<circle cx="220.3" cy="94.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>H.264 540p: 188 kbit/s, 100 % readable</title></circle>
+<circle cx="282.0" cy="94.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>H.264 540p: 382 kbit/s, 100 % readable</title></circle>
+<circle cx="363.0" cy="94.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>H.264 540p: 968 kbit/s, 100 % readable</title></circle>
+<path d="M63.3,270.2 L117.9,245.9 L175.2,94.0 L213.0,94.0 L253.1,94.0 L327.1,94.0" fill="none" stroke="#2a78d6" stroke-width="2"/>
+<circle cx="63.3" cy="270.2" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>H.264 720p: 31 kbit/s, 20 % readable</title></circle>
+<circle cx="117.9" cy="245.9" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>H.264 720p: 58 kbit/s, 31 % readable</title></circle>
+<circle cx="175.2" cy="94.0" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>H.264 720p: 112 kbit/s, 100 % readable</title></circle>
+<circle cx="213.0" cy="94.0" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>H.264 720p: 173 kbit/s, 100 % readable</title></circle>
+<circle cx="253.1" cy="94.0" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>H.264 720p: 274 kbit/s, 100 % readable</title></circle>
+<circle cx="327.1" cy="94.0" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>H.264 720p: 641 kbit/s, 100 % readable</title></circle>
+<text x="583.0" y="76" text-anchor="middle" font-weight="600" fill="#0b0b0b">H.265</text>
+<line x1="418" x2="748" y1="314.0" y2="314.0" stroke="#e4e3df"/>
+<line x1="418" x2="748" y1="259.0" y2="259.0" stroke="#e4e3df"/>
+<line x1="418" x2="748" y1="204.0" y2="204.0" stroke="#e4e3df"/>
+<line x1="418" x2="748" y1="149.0" y2="149.0" stroke="#e4e3df"/>
+<line x1="418" x2="748" y1="94.0" y2="94.0" stroke="#e4e3df"/>
+<text x="430.5" y="330" text-anchor="middle" fill="#52514e">30</text>
+<text x="490.8" y="330" text-anchor="middle" fill="#52514e">60</text>
+<text x="554.7" y="330" text-anchor="middle" fill="#52514e">125</text>
+<text x="615.1" y="330" text-anchor="middle" fill="#52514e">250</text>
+<text x="675.5" y="330" text-anchor="middle" fill="#52514e">500</text>
+<text x="735.8" y="330" text-anchor="middle" fill="#52514e">1000</text>
+<line x1="418" x2="748" y1="314" y2="314" stroke="#8a8984"/>
+<text x="583.0" y="350" text-anchor="middle" fill="#52514e">kbit/s (log scale)</text>
+<path d="M436.1,94.0 L487.9,94.0 L550.5,94.0 L613.0,94.0 L676.0,94.0 L736.7,94.0" fill="none" stroke="#1baf7a" stroke-width="2"/>
+<circle cx="436.1" cy="94.0" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>H.265 360p, 270p, 180p: 32 kbit/s, 100 % readable</title></circle>
+<circle cx="487.9" cy="94.0" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>H.265 360p, 270p, 180p: 58 kbit/s, 100 % readable</title></circle>
+<circle cx="550.5" cy="94.0" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>H.265 360p, 270p, 180p: 119 kbit/s, 100 % readable</title></circle>
+<circle cx="613.0" cy="94.0" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>H.265 360p, 270p, 180p: 244 kbit/s, 100 % readable</title></circle>
+<circle cx="676.0" cy="94.0" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>H.265 360p, 270p, 180p: 503 kbit/s, 100 % readable</title></circle>
+<circle cx="736.7" cy="94.0" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>H.265 360p, 270p, 180p: 1010 kbit/s, 100 % readable</title></circle>
+<path d="M448.7,297.0 L473.2,94.0 L522.2,94.0 L581.5,94.0 L661.3,94.0 L730.6,94.0" fill="none" stroke="#eb6834" stroke-width="2"/>
+<circle cx="448.7" cy="297.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>H.265 540p: 37 kbit/s, 8 % readable</title></circle>
+<circle cx="473.2" cy="94.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>H.265 540p: 49 kbit/s, 100 % readable</title></circle>
+<circle cx="522.2" cy="94.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>H.265 540p: 86 kbit/s, 100 % readable</title></circle>
+<circle cx="581.5" cy="94.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>H.265 540p: 170 kbit/s, 100 % readable</title></circle>
+<circle cx="661.3" cy="94.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>H.265 540p: 425 kbit/s, 100 % readable</title></circle>
+<circle cx="730.6" cy="94.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>H.265 540p: 942 kbit/s, 100 % readable</title></circle>
+<path d="M467.7,94.0 L469.6,96.4 L513.7,94.0 L555.4,94.0 L632.4,94.0 L697.4,94.0" fill="none" stroke="#2a78d6" stroke-width="2"/>
+<circle cx="467.7" cy="94.0" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>H.265 720p: 46 kbit/s, 100 % readable</title></circle>
+<circle cx="469.6" cy="96.4" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>H.265 720p: 47 kbit/s, 99 % readable</title></circle>
+<circle cx="513.7" cy="94.0" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>H.265 720p: 78 kbit/s, 100 % readable</title></circle>
+<circle cx="555.4" cy="94.0" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>H.265 720p: 126 kbit/s, 100 % readable</title></circle>
+<circle cx="632.4" cy="94.0" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>H.265 720p: 305 kbit/s, 100 % readable</title></circle>
+<circle cx="697.4" cy="94.0" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>H.265 720p: 643 kbit/s, 100 % readable</title></circle>
+</svg>
