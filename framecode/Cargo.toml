@@ -1,0 +1,7 @@
+[package]
+name = "framecode"
+description = "Frame identity code (camera id, frame number, capture time) drawn into and read back from video pictures"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true

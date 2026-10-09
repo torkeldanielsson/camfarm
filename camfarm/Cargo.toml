@@ -1,0 +1,18 @@
+[package]
+name = "camfarm"
+description = "Synthetic RTSP cameras: GPU-rendered pictures with a frame identity code, hardware-encoded, exact frame timing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+framecode = { path = "../framecode" }
+anyhow = "1"
+bytemuck = { version = "1", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
+gstreamer = { version = "0.25", features = ["v1_20"] }
+gstreamer-app = { version = "0.25", features = ["v1_20"] }
+gstreamer-rtsp-server = { version = "0.25", features = ["v1_20"] }
+pollster = "1"
+wgpu = "30"
