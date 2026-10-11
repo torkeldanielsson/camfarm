@@ -130,16 +130,18 @@ camfarm --cameras 32 --width 1280 --height 720 --fps 15 --codec h264 --bitrate-k
 
 Frame n of a camera is handed to its encoder at exactly `t0 + phase + n / fps`; that instant is the capture time in
 the code. Every camera has its own RTSP media and UDP sockets. Pictures are rendered on the GPU 200 ms ahead and
-handed to the encoders without a CPU copy; one thread pushes every frame at its due time, 99.9 % of them within
-25 µs. Run camfarm as root, or give it `CAP_SYS_NICE` (`sudo setcap cap_sys_nice+ep camfarm`), and that thread runs
-at real-time priority, which also trims the rare late wake-ups (worst case 0.9 ms down to 0.13 ms with 160 cameras
-on a Jetson AGX Orin).
+handed to the encoders without a CPU copy (MJPEG cameras render I420, which the JPEG encoders take directly); one
+thread pushes every frame at its due time, 99.9 % of them within 25 µs. Run camfarm as root, or give it
+`CAP_SYS_NICE` (`sudo setcap cap_sys_nice+ep camfarm`), and that thread runs at real-time priority, which also
+trims the rare late wake-ups (worst case 0.9 ms down to 0.13 ms with 160 cameras on a Jetson AGX Orin).
 
 Capacity notes:
 
 - A Jetson AGX Orin (MAXN, `jetson_clocks`) serves 32 x 720p15 at up to ~8 Mbit/s. Its single video encoder is the
   limit: 32 x 720p15 at 15 Mbit/s or 24 x 1080p15 at 8 Mbit/s saturate it. Check with `tegrastats` and verify the
   cameras with camcheck.
+- The same Jetson serves 160 x 720p15 MJPEG at quality 10 (about 3.4 Mbit/s each) with every frame on time, at
+  about 15 % CPU; its two JPEG encoders (NVJPG0/1) are then about 84 % busy and are the limit.
 - NVIDIA desktop GPUs allow a limited number of concurrent NVENC sessions (12 on a GeForce RTX 4070 with driver 610).
 - Software encoding needs `gstreamer1.0-plugins-ugly` (x264) and `gstreamer1.0-plugins-bad` (x265).
 

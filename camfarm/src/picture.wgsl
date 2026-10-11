@@ -1,4 +1,5 @@
-// One test camera picture, written as NV12 (Y plane, then interleaved UV) in packed u32 words.
+// One test camera picture, written as NV12 (Y plane, then interleaved UV) or, with `planar`, as I420 (Y, U and V
+// planes), in packed u32 words.
 //
 // Top tenth: the frame code band (see the framecode crate). Below: an animated value-noise field with domain
 // warping and a few drifting discs (motion for the encoder's inter prediction), plus per-pixel white noise
@@ -21,6 +22,7 @@ struct Params {
     hue: f32,
     speed: f32,
     bits: vec4<u32>,
+    planar: u32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -160,8 +162,22 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
         if (cy >= p.height / 2u) {
             return;
         }
-        let a = chroma(g.x * 2u, cy);
-        let b = chroma(g.x * 2u + 1u, cy);
-        out_words[(p.height + cy) * words_per_row + g.x] = a.x | (a.y << 8u) | (b.x << 16u) | (b.y << 24u);
+        if (p.planar == 0u) {
+            let a = chroma(g.x * 2u, cy);
+            let b = chroma(g.x * 2u + 1u, cy);
+            out_words[(p.height + cy) * words_per_row + g.x] = a.x | (a.y << 8u) | (b.x << 16u) | (b.y << 24u);
+            return;
+        }
+        let cw = p.width / 8u;
+        if (g.x >= cw) {
+            return;
+        }
+        let a = chroma(g.x * 4u, cy);
+        let b = chroma(g.x * 4u + 1u, cy);
+        let c = chroma(g.x * 4u + 2u, cy);
+        let d = chroma(g.x * 4u + 3u, cy);
+        let u = p.height * words_per_row + cy * cw + g.x;
+        out_words[u] = a.x | (b.x << 8u) | (c.x << 16u) | (d.x << 24u);
+        out_words[u + p.height / 2u * cw] = a.y | (b.y << 8u) | (c.y << 16u) | (d.y << 24u);
     }
 }

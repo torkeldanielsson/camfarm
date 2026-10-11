@@ -1,4 +1,4 @@
-//! GPU picture generator: renders test camera pictures (NV12) with a compute shader into mappable staging buffers,
+//! GPU picture generator: renders test camera pictures (NV12 or I420) with a compute shader into mappable staging buffers,
 //! one submit per batch. A batch is collected one tick after its submit, so the render thread never waits for the
 //! GPU, and its pictures are handed out zero-copy: a staging buffer stays mapped until GStreamer drops the picture.
 
@@ -23,6 +23,9 @@ pub struct Params {
     pub hue: f32,
     pub speed: f32,
     pub bits: [u32; 4],
+    /// I420 instead of NV12 (needs a width that is a multiple of 8)
+    pub planar: u32,
+    pub _pad: [u32; 3],
 }
 
 /// Per-job GPU resources of a batch, reused by the next batches (the queue orders them).

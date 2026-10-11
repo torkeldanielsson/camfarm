@@ -133,8 +133,14 @@ fn element_exists(name: &str) -> bool {
     gst::ElementFactory::find(name).is_some()
 }
 
+/// MJPEG cameras render I420, which the JPEG encoders take directly (on Jetson that skips a VIC conversion).
+fn planar(a: &Args) -> bool {
+    a.codec == Codec::Mjpeg && a.width.is_multiple_of(8)
+}
+
 fn pipeline_desc(a: &Args, enc: Encoder) -> Result<String> {
-    let caps = format!("video/x-raw,format=NV12,width={},height={},framerate={}/1", a.width, a.height, a.fps);
+    let format = if planar(a) { "I420" } else { "NV12" };
+    let caps = format!("video/x-raw,format={format},width={},height={},framerate={}/1", a.width, a.height, a.fps);
     let head = format!("appsrc name=src is-live=true format=time caps=\"{caps}\"");
     let gop = ((a.fps as f32) * a.gop_s).round().max(1.0) as u32;
     let (bps, kbps) = (a.bitrate_kbps as u64 * 1000, a.bitrate_kbps);
@@ -156,6 +162,12 @@ fn pipeline_desc(a: &Args, enc: Encoder) -> Result<String> {
             bps * 6 / 5,
             if a.vbr { 0 } else { 1 }
         ),
+        (Encoder::Jetson, Codec::Mjpeg) if planar(a) => {
+            format!("nvjpegenc quality={} ! rtpjpegpay name={pay} pt=26 mtu={mtu}", a.jpeg_quality)
+        }
+        (_, Codec::Mjpeg) if planar(a) => {
+            format!("jpegenc quality={} ! rtpjpegpay name={pay} pt=26 mtu={mtu}", a.jpeg_quality)
+        }
         (Encoder::Jetson, Codec::Mjpeg) => format!(
             "nvvidconv ! video/x-raw(memory:NVMM),format=I420 ! nvjpegenc quality={} ! rtpjpegpay name={pay} pt=26 mtu={mtu}",
             a.jpeg_quality
@@ -299,7 +311,7 @@ fn main() -> Result<()> {
     let ahead_frames = (AHEAD.as_millis() as u64 * a.fps as u64).div_ceil(1000) as usize;
     generator.reserve(max_batch, n as usize * (ahead_frames + 2) + max_batch);
     let geometry = framecode::Geometry::for_picture(a.width, a.height);
-    let (w, h, fps, noise, seed) = (a.width, a.height, a.fps, a.noise, a.seed);
+    let (w, h, fps, noise, seed, planar) = (a.width, a.height, a.fps, a.noise, a.seed, planar(&a));
     let params = move |c: &Camera, n: u64, capture_us: u64| gen::Params {
         width: w,
         height: h,
@@ -314,6 +326,8 @@ fn main() -> Result<()> {
         hue: (c.id as f32 * 0.618_034).fract(),
         speed: 0.3 + 0.05 * (c.id % 5) as f32,
         bits: framecode::encode(&framecode::FrameId { camera: c.id as u8, frame: n as u32, capture_us }),
+        planar: planar as u32,
+        _pad: [0; 3],
     };
     generator.submit(&vec![params(&cams[0], 0, 0); max_batch]);
     drop(generator.collect()?);
