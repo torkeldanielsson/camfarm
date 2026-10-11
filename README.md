@@ -129,7 +129,11 @@ camfarm --cameras 32 --width 1280 --height 720 --fps 15 --codec h264 --bitrate-k
 | `--port`, `--mount-prefix` | RTSP port (8554) and mount names (`cam`) |
 
 Frame n of a camera is handed to its encoder at exactly `t0 + phase + n / fps`; that instant is the capture time in
-the code. Every camera has its own RTSP media and UDP sockets.
+the code. Every camera has its own RTSP media and UDP sockets. Pictures are rendered on the GPU 200 ms ahead and
+handed to the encoders without a CPU copy; one thread pushes every frame at its due time, 99.9 % of them within
+25 µs. Run camfarm as root, or give it `CAP_SYS_NICE` (`sudo setcap cap_sys_nice+ep camfarm`), and that thread runs
+at real-time priority, which also trims the rare late wake-ups (worst case 0.9 ms down to 0.13 ms with 160 cameras
+on a Jetson AGX Orin).
 
 Capacity notes:
 
@@ -138,6 +142,16 @@ Capacity notes:
   cameras with camcheck.
 - NVIDIA desktop GPUs allow a limited number of concurrent NVENC sessions (12 on a GeForce RTX 4070 with driver 610).
 - Software encoding needs `gstreamer1.0-plugins-ugly` (x264) and `gstreamer1.0-plugins-bad` (x265).
+
+### Profiling
+
+```sh
+cargo build --release --features tracy   # Tracy 0.14 zones and plots; connect the Tracy profiler (port 8086)
+cargo build --release --features nvtx    # NVTX ranges for Nsight Systems (needs libclang to build)
+```
+
+The zones cover the render thread (`render loop`, `gpu submit`, `gpu wait`) and the push thread (`push frame`,
+`appsrc push`). Run as root for Tracy's context switch and sampling data.
 
 ## camcheck
 
