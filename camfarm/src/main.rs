@@ -279,10 +279,14 @@ fn main() -> Result<()> {
             let src = bin.by_name("src").expect("appsrc").downcast::<gst_app::AppSrc>().expect("appsrc type");
             src.set_max_buffers(4);
             src.set_leaky_type(gst_app::AppLeakyType::Downstream);
-            *cams_c[k].appsrc.lock().unwrap() = Some(src);
+            *cams_c[k].appsrc.lock().unwrap() = Some(src.clone());
             let cams_u = cams_c.clone();
+            // a reconnecting client may have configured a new media by now; leave that one alone
             media.connect_unprepared(move |_| {
-                *cams_u[k].appsrc.lock().unwrap() = None;
+                let mut current = cams_u[k].appsrc.lock().unwrap();
+                if current.as_ref() == Some(&src) {
+                    *current = None;
+                }
             });
         });
         mounts.add_factory(&format!("/{}{:02}", a.mount_prefix, c.id), factory);
@@ -452,9 +456,10 @@ fn push_frame(c: &Camera, due: Instant, mut buf: gst::Buffer, period: Duration) 
         zone!("appsrc push");
         src.push_buffer(buf).is_ok()
     };
+    // a failed push means the media is going away; its unprepared handler clears the appsrc
     if pushed {
         c.pushed.fetch_add(1, Relaxed);
     } else {
-        *c.appsrc.lock().unwrap() = None;
+        c.unconnected.fetch_add(1, Relaxed);
     }
 }
