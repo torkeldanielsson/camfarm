@@ -16,8 +16,14 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Pictures are rendered this far ahead of their due time, which absorbs GPU and scheduling stalls.
-const AHEAD: Duration = Duration::from_millis(200);
-const TICK: Duration = Duration::from_millis(10);
+const RENDER_AHEAD: Duration = Duration::from_millis(200);
+const RENDER_TICK: Duration = Duration::from_millis(10);
+const MIN_BATCH: usize = 64;
+const START_DELAY: Duration = Duration::from_millis(1500);
+const LATE: Duration = Duration::from_millis(2);
+#[cfg(target_os = "linux")]
+const PUSH_THREAD_PRIORITY: i32 = 10;
+const APPSRC_MAX_BUFFERS: u64 = 4;
 const PEAK_BITRATE_PERCENT: u64 = 120;
 
 #[derive(Clone, Copy, ValueEnum, Debug, PartialEq)]
@@ -45,7 +51,7 @@ enum Phase {
     Aligned,
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Clone, Debug)]
 #[command(name = "camfarm", version, about = "Synthetic RTSP cameras with a frame identity code")]
 struct Args {
     #[arg(long, default_value_t = 32, value_parser = clap::value_parser!(u32).range(1..))]
@@ -93,6 +99,7 @@ struct Args {
     stats_s: u64,
 }
 
+#[derive(Default)]
 struct Camera {
     id: u32,
     phase: Duration,
@@ -119,8 +126,17 @@ struct Timeline {
 }
 
 impl Timeline {
+    fn start(period: Duration) -> Result<Self> {
+        let unix_now = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        Ok(Self { t0: Instant::now() + START_DELAY, rt0_us: (unix_now + START_DELAY).as_micros() as u64, period })
+    }
+
     fn due(&self, c: &Camera, n: u64) -> Instant {
         self.t0 + c.phase + self.period * n as u32
+    }
+
+    fn capture_us(&self, due: Instant) -> u64 {
+        self.rt0_us + (due - self.t0).as_micros() as u64
     }
 }
 
@@ -129,12 +145,12 @@ fn element_exists(name: &str) -> bool {
 }
 
 /// MJPEG cameras render I420, which the JPEG encoders take directly (on Jetson that skips a VIC conversion).
-fn planar(a: &Args) -> bool {
+fn renders_i420(a: &Args) -> bool {
     a.codec == Codec::Mjpeg && a.width.is_multiple_of(8)
 }
 
 fn pipeline_desc(a: &Args, enc: Encoder) -> String {
-    let format = if planar(a) { "I420" } else { "NV12" };
+    let format = if renders_i420(a) { "I420" } else { "NV12" };
     let caps = format!("video/x-raw,format={format},width={},height={},framerate={}/1", a.width, a.height, a.fps);
     let gop = ((a.fps as f32) * a.gop_s).round().max(1.0) as u32;
     let kbps = a.bitrate_kbps as u64;
@@ -146,11 +162,11 @@ fn pipeline_desc(a: &Args, enc: Encoder) -> String {
         Codec::Mjpeg => "jpeg",
     };
     let encoder = match (enc, a.codec) {
-        (Encoder::Jetson, Codec::Mjpeg) if planar(a) => format!("nvjpegenc quality={quality}"),
+        (Encoder::Jetson, Codec::Mjpeg) if renders_i420(a) => format!("nvjpegenc quality={quality}"),
         (Encoder::Jetson, Codec::Mjpeg) => {
             format!("nvvidconv ! video/x-raw(memory:NVMM),format=I420 ! nvjpegenc quality={quality}")
         }
-        (_, Codec::Mjpeg) if planar(a) => format!("jpegenc quality={quality}"),
+        (_, Codec::Mjpeg) if renders_i420(a) => format!("jpegenc quality={quality}"),
         (_, Codec::Mjpeg) => format!("videoconvert ! video/x-raw,format=I420 ! jpegenc quality={quality}"),
         (Encoder::Jetson, _) => format!(
             "nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! nvv4l2{codec}enc bitrate={} peak-bitrate={} \
@@ -191,11 +207,45 @@ fn resolve_encoder(a: &Args) -> Encoder {
     }
 }
 
-fn splitmix(mut x: u64) -> u64 {
+fn splitmix64(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9e3779b97f4a7c15);
     x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
     x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
     x ^ (x >> 31)
+}
+
+fn cameras(a: &Args, period: Duration) -> Vec<Camera> {
+    (0..a.cameras)
+        .map(|k| {
+            let phase = match a.phase {
+                Phase::Spread => period * k / a.cameras,
+                Phase::Random => Duration::from_nanos(splitmix64(a.seed ^ (k as u64 + 1)) % period.as_nanos() as u64),
+                Phase::Aligned => Duration::ZERO,
+            };
+            Camera { id: a.first_id + k, phase, ..Default::default() }
+        })
+        .collect()
+}
+
+fn picture_params(a: &Args, c: &Camera, n: u64, capture_us: u64) -> gen::Params {
+    let geometry = framecode::Geometry::for_picture(a.width, a.height);
+    gen::Params {
+        width: a.width,
+        height: a.height,
+        band_rows: geometry.band_rows(),
+        cell_w: geometry.cell_w,
+        cell_h: geometry.cell_h,
+        cols: framecode::COLS,
+        frame: n as u32,
+        seed: (a.seed as u32) ^ c.id.wrapping_mul(2654435761),
+        time: n as f32 / a.fps as f32,
+        noise: a.noise,
+        hue: (c.id as f32 * 0.618_034).fract(),
+        speed: 0.3 + 0.05 * (c.id % 5) as f32,
+        bits: framecode::encode(&framecode::FrameId { camera: c.id as u8, frame: n as u32, capture_us }),
+        i420: renders_i420(a) as u32,
+        _pad: [0; 3],
+    }
 }
 
 fn main() -> Result<()> {
@@ -211,31 +261,11 @@ fn main() -> Result<()> {
     gst::parse::launch(&desc).with_context(|| format!("cannot build the camera pipeline {desc}"))?;
     let mut generator = gen::Generator::new(a.width, a.height)?;
     let period = Duration::from_nanos(1_000_000_000 / a.fps as u64);
-    let n = a.cameras;
-    let cams: Arc<Vec<Camera>> = Arc::new(
-        (0..n)
-            .map(|k| {
-                let phase = match a.phase {
-                    Phase::Spread => period * k / n,
-                    Phase::Random => Duration::from_nanos(splitmix(a.seed ^ (k as u64 + 1)) % period.as_nanos() as u64),
-                    Phase::Aligned => Duration::ZERO,
-                };
-                Camera {
-                    id: a.first_id + k,
-                    phase,
-                    appsrc: Mutex::new(None),
-                    pushed: AtomicU64::new(0),
-                    unconnected: AtomicU64::new(0),
-                    skipped: AtomicU64::new(0),
-                    late: AtomicU64::new(0),
-                    max_late_us: AtomicU64::new(0),
-                }
-            })
-            .collect(),
-    );
+    let cams = Arc::new(cameras(&a, period));
 
     println!(
-        "camfarm: {n} x {}x{}@{} {:?} via {:?}, {} kbit/s {}, GOP {} s, noise {}, phase {:?}, GPU {}",
+        "camfarm: {} x {}x{}@{} {:?} via {:?}, {} kbit/s {}, GOP {} s, noise {}, phase {:?}, GPU {}",
+        a.cameras,
         a.width,
         a.height,
         a.fps,
@@ -259,27 +289,59 @@ fn main() -> Result<()> {
             c.phase.as_secs_f64() * 1000.0
         );
     }
+    let _server = start_rtsp_server(&a, &desc, &cams)?;
 
+    // Allocate every GPU buffer and run one batch before the time base is set, so the first frames are on time.
+    let frames_per_tick = (cams.len() as u64 * a.fps as u64 * RENDER_TICK.as_millis() as u64).div_ceil(1000) as usize;
+    let max_batch = (2 * frames_per_tick).max(MIN_BATCH);
+    let ahead_frames = (RENDER_AHEAD.as_millis() as u64 * a.fps as u64).div_ceil(1000) as usize;
+    generator.reserve(max_batch, cams.len() * (ahead_frames + 2) + max_batch);
+    generator.submit(&vec![picture_params(&a, &cams[0], 0, 0); max_batch]);
+    drop(generator.collect()?);
+
+    let timeline = Arc::new(Timeline::start(period)?);
+    let ready = Arc::new(Ready::default());
+    {
+        let (a, cams, ready, timeline) = (a.clone(), cams.clone(), ready.clone(), timeline.clone());
+        std::thread::Builder::new().name("render".into()).spawn(move || {
+            let Err(e) = render_loop(generator, &a, &cams, &ready, &timeline, max_batch);
+            eprintln!("camfarm: render failed: {e:#}");
+            std::process::exit(1);
+        })?;
+    }
+    {
+        let cams = cams.clone();
+        std::thread::Builder::new().name("push".into()).spawn(move || push_loop(&cams, &ready, period))?;
+    }
+    {
+        let every = Duration::from_secs(a.stats_s.max(1));
+        std::thread::Builder::new().name("stats".into()).spawn(move || stats_loop(&cams, every))?;
+    }
+    gst::glib::MainLoop::new(None, false).run();
+    Ok(())
+}
+
+fn start_rtsp_server(a: &Args, desc: &str, cams: &Arc<Vec<Camera>>) -> Result<gst::glib::SourceId> {
     let server = rtsp::RTSPServer::new();
     server.set_service(&a.port.to_string());
     let mounts = server.mount_points().ok_or_else(|| anyhow!("no mount points"))?;
     for (k, c) in cams.iter().enumerate() {
         let factory = rtsp::RTSPMediaFactory::new();
-        factory.set_launch(&desc);
+        factory.set_launch(desc);
         factory.set_shared(true);
         factory.set_suspend_mode(rtsp::RTSPSuspendMode::None);
         factory.set_eos_shutdown(false);
-        let cams_c = cams.clone();
+        let cams = cams.clone();
         factory.connect_media_configure(move |_, media| {
             let bin = media.element().downcast::<gst::Bin>().expect("media element is a bin");
             let src = bin.by_name("src").expect("appsrc").downcast::<gst_app::AppSrc>().expect("appsrc type");
-            src.set_max_buffers(4);
+            src.set_max_buffers(APPSRC_MAX_BUFFERS);
             src.set_leaky_type(gst_app::AppLeakyType::Downstream);
-            *cams_c[k].appsrc.lock().unwrap() = Some(src.clone());
-            let cams_u = cams_c.clone();
+            *cams[k].appsrc.lock().unwrap() = Some(src.clone());
+            let cams = cams.clone();
             // a reconnecting client may have configured a new media by now; leave that one alone
             media.connect_unprepared(move |_| {
-                let mut current = cams_u[k].appsrc.lock().unwrap();
+                let mut current = cams[k].appsrc.lock().unwrap();
                 if current.as_ref() == Some(&src) {
                     *current = None;
                 }
@@ -287,120 +349,74 @@ fn main() -> Result<()> {
         });
         mounts.add_factory(&format!("/{}{:02}", a.mount_prefix, c.id), factory);
     }
-    let _server_id =
-        server.attach(None).map_err(|e| anyhow!("cannot listen on RTSP port {} (in use?): {e}", a.port))?;
+    server.attach(None).map_err(|e| anyhow!("cannot listen on RTSP port {} (in use?): {e}", a.port))
+}
 
-    // Allocate every GPU buffer and run one batch before the time base is set, so the first frames are on time.
-    let per_tick = (n as u64 * a.fps as u64 * TICK.as_millis() as u64).div_ceil(1000) as usize;
-    let max_batch = (2 * per_tick).max(64);
-    let ahead_frames = (AHEAD.as_millis() as u64 * a.fps as u64).div_ceil(1000) as usize;
-    generator.reserve(max_batch, n as usize * (ahead_frames + 2) + max_batch);
-    let geometry = framecode::Geometry::for_picture(a.width, a.height);
-    let (w, h, fps, noise, seed, planar) = (a.width, a.height, a.fps, a.noise, a.seed, planar(&a));
-    let params = move |c: &Camera, n: u64, capture_us: u64| gen::Params {
-        width: w,
-        height: h,
-        band_rows: geometry.band_rows(),
-        cell_w: geometry.cell_w,
-        cell_h: geometry.cell_h,
-        cols: framecode::COLS,
-        frame: n as u32,
-        seed: (seed as u32) ^ c.id.wrapping_mul(2654435761),
-        time: n as f32 / fps as f32,
-        noise,
-        hue: (c.id as f32 * 0.618_034).fract(),
-        speed: 0.3 + 0.05 * (c.id % 5) as f32,
-        bits: framecode::encode(&framecode::FrameId { camera: c.id as u8, frame: n as u32, capture_us }),
-        planar: planar as u32,
-        _pad: [0; 3],
-    };
-    generator.submit(&vec![params(&cams[0], 0, 0); max_batch]);
-    drop(generator.collect()?);
-
-    let timeline = Arc::new(Timeline {
-        t0: Instant::now() + Duration::from_millis(1500),
-        rt0_us: (SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros() + 1_500_000) as u64,
-        period,
-    });
-    let ready = Arc::new(Ready::default());
-
-    {
-        let (cams, ready, timeline) = (cams.clone(), ready.clone(), timeline.clone());
-        std::thread::Builder::new().name("render".into()).spawn(move || {
-            let mut schedule: BinaryHeap<Reverse<(Instant, usize, u64)>> =
-                cams.iter().enumerate().map(|(ci, c)| Reverse((timeline.due(c, 0), ci, 0))).collect();
-            let mut pending: Vec<(Instant, usize)> = Vec::new();
-            let mut jobs: Vec<gen::Params> = Vec::new();
-            loop {
-                let tick = Instant::now();
-                {
-                    zone!("render loop");
-                    match generator.collect() {
-                        Ok(pictures) if !pictures.is_empty() => {
-                            let buffers: Vec<_> = pictures.into_iter().map(gst::Buffer::from_slice).collect();
-                            ready.frames.lock().unwrap().extend(pending.drain(..).zip(buffers));
-                            ready.changed.notify_one();
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            eprintln!("camfarm: render failed: {e:#}");
-                            std::process::exit(1);
-                        }
-                    }
-                    let now = Instant::now();
-                    jobs.clear();
-                    while let Some(&Reverse((due, ci, n))) = schedule.peek() {
-                        if due >= now + AHEAD || jobs.len() >= max_batch {
-                            break;
-                        }
-                        let c = &cams[ci];
-                        schedule.pop();
-                        schedule.push(Reverse((timeline.due(c, n + 1), ci, n + 1)));
-                        if due + timeline.period < now {
-                            c.skipped.fetch_add(1, Relaxed);
-                            continue;
-                        }
-                        pending.push((due, ci));
-                        jobs.push(params(c, n, timeline.rt0_us + (due - timeline.t0).as_micros() as u64));
-                    }
-                    plot!("batch frames", jobs.len());
-                    generator.submit(&jobs);
-                }
-                let spent = tick.elapsed();
-                if spent < TICK {
-                    std::thread::sleep(TICK - spent);
-                }
+fn render_loop(
+    mut generator: gen::Generator,
+    a: &Args,
+    cams: &[Camera],
+    ready: &Ready,
+    timeline: &Timeline,
+    max_batch: usize,
+) -> Result<std::convert::Infallible> {
+    let mut schedule: BinaryHeap<Reverse<(Instant, usize, u64)>> =
+        cams.iter().enumerate().map(|(ci, c)| Reverse((timeline.due(c, 0), ci, 0))).collect();
+    let mut pending: Vec<(Instant, usize)> = Vec::new();
+    let mut jobs: Vec<gen::Params> = Vec::new();
+    loop {
+        let tick = Instant::now();
+        {
+            zone!("render loop");
+            let pictures = generator.collect()?;
+            if !pictures.is_empty() {
+                let buffers: Vec<_> = pictures.into_iter().map(gst::Buffer::from_slice).collect();
+                ready.frames.lock().unwrap().extend(pending.drain(..).zip(buffers));
+                ready.changed.notify_one();
             }
-        })?;
+            let now = Instant::now();
+            jobs.clear();
+            while let Some(&Reverse((due, ci, n))) = schedule.peek() {
+                if due >= now + RENDER_AHEAD || jobs.len() >= max_batch {
+                    break;
+                }
+                let c = &cams[ci];
+                schedule.pop();
+                schedule.push(Reverse((timeline.due(c, n + 1), ci, n + 1)));
+                if due + timeline.period < now {
+                    c.skipped.fetch_add(1, Relaxed);
+                    continue;
+                }
+                pending.push((due, ci));
+                jobs.push(picture_params(a, c, n, timeline.capture_us(due)));
+            }
+            plot!("batch frames", jobs.len());
+            generator.submit(&jobs);
+        }
+        let spent = tick.elapsed();
+        if spent < RENDER_TICK {
+            std::thread::sleep(RENDER_TICK - spent);
+        }
     }
+}
 
-    {
-        let cams = cams.clone();
-        std::thread::Builder::new().name("push".into()).spawn(move || push_loop(&cams, &ready, period))?;
+fn stats_loop(cams: &[Camera], every: Duration) {
+    loop {
+        std::thread::sleep(every);
+        let sum = |f: fn(&Camera) -> u64| cams.iter().map(f).sum::<u64>();
+        let connected = cams.iter().filter(|c| c.appsrc.lock().unwrap().is_some()).count();
+        println!(
+            "stats: {connected}/{} cameras streaming, frames pushed {}, not connected {}, late >{} ms {}, \
+             skipped {}, max late {:.2} ms",
+            cams.len(),
+            sum(|c| c.pushed.load(Relaxed)),
+            sum(|c| c.unconnected.load(Relaxed)),
+            LATE.as_millis(),
+            sum(|c| c.late.load(Relaxed)),
+            sum(|c| c.skipped.load(Relaxed)),
+            cams.iter().map(|c| c.max_late_us.load(Relaxed)).max().unwrap_or(0) as f64 / 1000.0
+        );
     }
-
-    {
-        let cams = cams.clone();
-        let every = Duration::from_secs(a.stats_s.max(1));
-        std::thread::Builder::new().name("stats".into()).spawn(move || loop {
-            std::thread::sleep(every);
-            let sum = |f: fn(&Camera) -> u64| cams.iter().map(f).sum::<u64>();
-            let connected = cams.iter().filter(|c| c.appsrc.lock().unwrap().is_some()).count();
-            println!(
-                "stats: {connected}/{} cameras streaming, frames pushed {}, not connected {}, late >2 ms {}, \
-                 skipped {}, max late {:.2} ms",
-                cams.len(),
-                sum(|c| c.pushed.load(Relaxed)),
-                sum(|c| c.unconnected.load(Relaxed)),
-                sum(|c| c.late.load(Relaxed)),
-                sum(|c| c.skipped.load(Relaxed)),
-                cams.iter().map(|c| c.max_late_us.load(Relaxed)).max().unwrap_or(0) as f64 / 1000.0
-            );
-        })?;
-    }
-
-    gst::glib::MainLoop::new(None, false).run();
-    Ok(())
 }
 
 fn push_loop(cams: &[Camera], ready: &Ready, period: Duration) {
@@ -408,7 +424,7 @@ fn push_loop(cams: &[Camera], ready: &Ready, period: Duration) {
     unsafe {
         // a 1 ns timer slack lets this thread sleep until a frame is due instead of spinning
         libc::prctl(libc::PR_SET_TIMERSLACK, 1);
-        let param = libc::sched_param { sched_priority: 10 };
+        let param = libc::sched_param { sched_priority: PUSH_THREAD_PRIORITY };
         if libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param) == 0 {
             println!("push thread: real-time priority");
         } else {
@@ -417,16 +433,17 @@ fn push_loop(cams: &[Camera], ready: &Ready, period: Duration) {
     }
     let mut frames = ready.frames.lock().unwrap();
     loop {
-        let Some(&(due, ci)) = frames.keys().next() else {
+        let Some(entry) = frames.first_entry() else {
             frames = ready.changed.wait(frames).unwrap();
             continue;
         };
+        let (due, ci) = *entry.key();
         let now = Instant::now();
         if due > now {
             frames = ready.changed.wait_timeout(frames, due - now).unwrap().0;
             continue;
         }
-        let (_, buf) = frames.pop_first().unwrap();
+        let buf = entry.remove();
         drop(frames);
         push_frame(&cams[ci], due, buf, period);
         frames = ready.frames.lock().unwrap();
@@ -435,18 +452,19 @@ fn push_loop(cams: &[Camera], ready: &Ready, period: Duration) {
 
 fn push_frame(c: &Camera, due: Instant, mut buf: gst::Buffer, period: Duration) {
     zone!("push frame");
-    let late = Instant::now().saturating_duration_since(due).as_micros() as u64;
-    if late > 2000 {
+    let late = Instant::now().saturating_duration_since(due);
+    if late > LATE {
         c.late.fetch_add(1, Relaxed);
     }
-    c.max_late_us.fetch_max(late, Relaxed);
-    plot!("push late ms", late as f64 / 1000.0);
+    let late_us = late.as_micros() as u64;
+    c.max_late_us.fetch_max(late_us, Relaxed);
+    plot!("push late ms", late_us as f64 / 1000.0);
     let src = c.appsrc.lock().unwrap().clone();
     let Some(src) = src else {
         c.unconnected.fetch_add(1, Relaxed);
         return;
     };
-    let b = buf.get_mut().unwrap();
+    let b = buf.make_mut();
     b.set_pts(src.current_running_time());
     b.set_duration(gst::ClockTime::from_nseconds(period.as_nanos() as u64));
     let pushed = {

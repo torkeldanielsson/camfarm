@@ -1,4 +1,4 @@
-// One picture as NV12, or I420 with `planar`, in packed u32 words. Below the frame code band: a smooth field with
+// One picture as NV12, or I420 with `i420`, in packed u32 words. Below the frame code band: a smooth field with
 // drifting discs (motion for inter prediction), rendered at quarter size by `field` and sampled by `main`, plus
 // per-pixel white noise, which sets how many bits the encoder needs.
 // Integer hash: "lowbias32" by Chris Wellons (https://nullprogram.com/blog/2018/07/31/), public domain.
@@ -17,7 +17,7 @@ struct Params {
     hue: f32,
     speed: f32,
     bits: vec4<u32>,
-    planar: u32,
+    i420: u32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -156,7 +156,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
         if (cy >= p.height / 2u) {
             return;
         }
-        if (p.planar == 0u) {
+        if (p.i420 == 0u) {
             let a = chroma(g.x * 2u, cy);
             let b = chroma(g.x * 2u + 1u, cy);
             out_words[(p.height + cy) * words_per_row + g.x] = a.x | (a.y << 8u) | (b.x << 16u) | (b.y << 24u);

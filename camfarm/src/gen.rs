@@ -22,8 +22,7 @@ pub struct Params {
     pub hue: f32,
     pub speed: f32,
     pub bits: [u32; 4],
-    /// I420 instead of NV12 (needs a width that is a multiple of 8)
-    pub planar: u32,
+    pub i420: u32,
     pub _pad: [u32; 3],
 }
 
