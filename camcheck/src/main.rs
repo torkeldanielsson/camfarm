@@ -10,7 +10,7 @@
 //! backwards (an older picture shown after a newer one), unreadable, pictures of the wrong camera, and the latency
 //! from the capture time in the code to the arrival here (sender and receiver clocks must be in sync, e.g. NTP).
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use framecode::{DecodeError, FrameId};
 use gst::prelude::*;
@@ -419,17 +419,24 @@ fn main() -> Result<()> {
         return report(&args, &cams, &recs, (args.warmup * 1e6) as u64, t_to);
     }
 
-    // One pipeline for all cameras, so all CUDA IPC readers share one CUDA context.
-    let desc = cams.iter().enumerate().map(|(k, &cam)| pipeline_for(&args.mode, cam, k)).collect::<Vec<_>>().join(" ");
-    let pipeline = gst::parse::launch(&desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
-    pipeline.bus().context("pipeline without a bus")?.set_sync_handler(|_, message| {
-        if let Some(e) = error_text(message) {
-            eprintln!("camcheck: {e}");
-        }
-        gst::BusSyncReply::Drop
-    });
+    // An error while a pipeline starts (one refused camera) stops the whole pipeline, so every RTSP camera gets its
+    // own; CUDA IPC readers share one pipeline, so they share one CUDA context.
+    let descs: Vec<String> = cams.iter().enumerate().map(|(k, &cam)| pipeline_for(&args.mode, cam, k)).collect();
+    let descs = if cuda { vec![descs.join(" ")] } else { descs };
+    let mut pipelines = Vec::with_capacity(descs.len());
+    for desc in &descs {
+        let pipeline = gst::parse::launch(desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
+        pipeline.bus().context("pipeline without a bus")?.set_sync_handler(|_, message| {
+            if let Some(e) = error_text(message) {
+                eprintln!("camcheck: {e}");
+            }
+            gst::BusSyncReply::Drop
+        });
+        pipelines.push(pipeline);
+    }
     for (k, _) in cams.iter().enumerate() {
-        let sink = pipeline.by_name(&format!("sink{k}")).unwrap().downcast::<gst_app::AppSink>().unwrap();
+        let sink = pipelines.iter().find_map(|p| p.by_name(&format!("sink{k}"))).unwrap();
+        let sink = sink.downcast::<gst_app::AppSink>().unwrap();
         let recs_c = recs.clone();
         sink.set_callbacks(
             gst_app::AppSinkCallbacks::builder()
@@ -443,9 +450,10 @@ fn main() -> Result<()> {
                 .build(),
         );
     }
-    if pipeline.set_state(gst::State::Playing).is_err() {
-        let _ = pipeline.set_state(gst::State::Null);
-        bail!("cannot start the pipeline");
+    for pipeline in &pipelines {
+        if pipeline.set_state(gst::State::Playing).is_err() {
+            eprintln!("camcheck: {} did not start", pipeline.name());
+        }
     }
     let start = Instant::now();
     let t_from = now_us() + (args.warmup * 1e6) as u64;
@@ -453,7 +461,9 @@ fn main() -> Result<()> {
     while start.elapsed() < Duration::from_secs_f64(args.warmup + args.seconds + 0.2) {
         std::thread::sleep(Duration::from_millis(200));
     }
-    let _ = pipeline.set_state(gst::State::Null);
+    for pipeline in &pipelines {
+        let _ = pipeline.set_state(gst::State::Null);
+    }
     report(&args, &cams, &recs, t_from, t_to)
 }
 
