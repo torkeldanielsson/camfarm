@@ -8,5 +8,9 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/torkeldanielsson/camfarm"
 
+# a panic in the render or push thread must stop camfarm, not leave it serving cameras without pictures
+[profile.dev]
+panic = "abort"
+
 [profile.release]
-debug = false
+panic = "abort"

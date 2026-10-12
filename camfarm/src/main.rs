@@ -362,8 +362,8 @@ fn main() -> Result<()> {
                         }
                         Ok(_) => {}
                         Err(e) => {
-                            eprintln!("render failed: {e}");
-                            pending.clear();
+                            eprintln!("camfarm: render failed: {e:#}");
+                            std::process::exit(1);
                         }
                     }
                     let now = Instant::now();
