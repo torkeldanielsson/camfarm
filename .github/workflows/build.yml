@@ -25,10 +25,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Dependencies
+        # libunwind-dev by name: the runner images carry LLVM's libunwind-14-dev, which apt will not remove on its own
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-            libgstrtspserver-1.0-dev
+            libgstrtspserver-1.0-dev libunwind-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
