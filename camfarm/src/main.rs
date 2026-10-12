@@ -321,7 +321,7 @@ fn main() -> Result<()> {
         cell_h: geometry.cell_h,
         cols: framecode::COLS,
         frame: n as u32,
-        seed: (seed as u32) ^ (c.id * 2654435761),
+        seed: (seed as u32) ^ c.id.wrapping_mul(2654435761),
         time: n as f32 / fps as f32,
         noise,
         hue: (c.id as f32 * 0.618_034).fract(),
