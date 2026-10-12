@@ -24,6 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// Pictures are rendered this far ahead of their due time, which absorbs GPU and scheduling stalls.
 const AHEAD: Duration = Duration::from_millis(200);
 const TICK: Duration = Duration::from_millis(10);
+const PEAK_BITRATE_PERCENT: u64 = 120;
 
 #[derive(Clone, Copy, ValueEnum, Debug, PartialEq)]
 enum Codec {
@@ -138,68 +139,53 @@ fn planar(a: &Args) -> bool {
     a.codec == Codec::Mjpeg && a.width.is_multiple_of(8)
 }
 
-fn pipeline_desc(a: &Args, enc: Encoder) -> Result<String> {
+fn pipeline_desc(a: &Args, enc: Encoder) -> String {
     let format = if planar(a) { "I420" } else { "NV12" };
     let caps = format!("video/x-raw,format={format},width={},height={},framerate={}/1", a.width, a.height, a.fps);
-    let head = format!("appsrc name=src is-live=true format=time caps=\"{caps}\"");
     let gop = ((a.fps as f32) * a.gop_s).round().max(1.0) as u32;
-    let (bps, kbps) = (a.bitrate_kbps as u64 * 1000, a.bitrate_kbps);
-    let pay = if a.onvif { "pay" } else { "pay0" };
-    let mtu = a.mtu;
-    let body = match (enc, a.codec) {
-        (Encoder::Jetson, Codec::H264) => format!(
-            "nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! nvv4l2h264enc bitrate={bps} peak-bitrate={} \
-             control-rate={} iframeinterval={gop} idrinterval={gop} insert-sps-pps=true insert-vui=true \
-             maxperf-enable=true num-B-Frames=0 profile=4 ! h264parse ! rtph264pay name={pay} pt=96 \
-             config-interval=-1 mtu={mtu}",
-            bps * 6 / 5,
-            if a.vbr { 0 } else { 1 }
-        ),
-        (Encoder::Jetson, Codec::H265) => format!(
-            "nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! nvv4l2h265enc bitrate={bps} peak-bitrate={} \
-             control-rate={} iframeinterval={gop} idrinterval={gop} insert-sps-pps=true insert-vui=true \
-             maxperf-enable=true num-B-Frames=0 ! h265parse ! rtph265pay name={pay} pt=96 config-interval=-1 mtu={mtu}",
-            bps * 6 / 5,
-            if a.vbr { 0 } else { 1 }
-        ),
-        (Encoder::Jetson, Codec::Mjpeg) if planar(a) => {
-            format!("nvjpegenc quality={} ! rtpjpegpay name={pay} pt=26 mtu={mtu}", a.jpeg_quality)
+    let kbps = a.bitrate_kbps as u64;
+    let peak_kbps = kbps * PEAK_BITRATE_PERCENT / 100;
+    let quality = a.jpeg_quality;
+    let codec = match a.codec {
+        Codec::H264 => "h264",
+        Codec::H265 => "h265",
+        Codec::Mjpeg => "jpeg",
+    };
+    let encoder = match (enc, a.codec) {
+        (Encoder::Jetson, Codec::Mjpeg) if planar(a) => format!("nvjpegenc quality={quality}"),
+        (Encoder::Jetson, Codec::Mjpeg) => {
+            format!("nvvidconv ! video/x-raw(memory:NVMM),format=I420 ! nvjpegenc quality={quality}")
         }
-        (_, Codec::Mjpeg) if planar(a) => {
-            format!("jpegenc quality={} ! rtpjpegpay name={pay} pt=26 mtu={mtu}", a.jpeg_quality)
-        }
-        (Encoder::Jetson, Codec::Mjpeg) => format!(
-            "nvvidconv ! video/x-raw(memory:NVMM),format=I420 ! nvjpegenc quality={} ! rtpjpegpay name={pay} pt=26 mtu={mtu}",
-            a.jpeg_quality
+        (_, Codec::Mjpeg) if planar(a) => format!("jpegenc quality={quality}"),
+        (_, Codec::Mjpeg) => format!("videoconvert ! video/x-raw,format=I420 ! jpegenc quality={quality}"),
+        (Encoder::Jetson, _) => format!(
+            "nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! nvv4l2{codec}enc bitrate={} peak-bitrate={} \
+             control-rate={} iframeinterval={gop} idrinterval={gop} insert-sps-pps=true insert-vui=true \
+             maxperf-enable=true num-B-Frames=0{}",
+            kbps * 1000,
+            kbps * 1000 * PEAK_BITRATE_PERCENT / 100,
+            if a.vbr { 0 } else { 1 },
+            if a.codec == Codec::H264 { " profile=4" } else { "" }
         ),
-        (Encoder::Nvcodec, Codec::H264) => format!(
-            "nvh264enc bitrate={kbps} max-bitrate={} rc-mode={} gop-size={gop} bframes=0 zerolatency=true ! \
-             h264parse ! rtph264pay name={pay} pt=96 config-interval=-1 mtu={mtu}",
-            kbps * 6 / 5,
-            if a.vbr { "vbr" } else { "cbr" }
-        ),
-        (Encoder::Nvcodec, Codec::H265) => format!(
-            "nvh265enc bitrate={kbps} max-bitrate={} rc-mode={} gop-size={gop} bframes=0 zerolatency=true ! \
-             h265parse ! rtph265pay name={pay} pt=96 config-interval=-1 mtu={mtu}",
-            kbps * 6 / 5,
+        (Encoder::Nvcodec, _) => format!(
+            "nv{codec}enc bitrate={kbps} max-bitrate={peak_kbps} rc-mode={} gop-size={gop} bframes=0 zerolatency=true",
             if a.vbr { "vbr" } else { "cbr" }
         ),
         (Encoder::Software, Codec::H264) => format!(
-            "videoconvert ! x264enc tune=zerolatency speed-preset=veryfast bitrate={kbps} key-int-max={gop} bframes=0 ! \
-             h264parse ! rtph264pay name={pay} pt=96 config-interval=-1 mtu={mtu}"
+            "videoconvert ! x264enc tune=zerolatency speed-preset=veryfast bitrate={kbps} key-int-max={gop} bframes=0"
         ),
-        (Encoder::Software, Codec::H265) => format!(
-            "videoconvert ! x265enc tune=zerolatency speed-preset=veryfast bitrate={kbps} key-int-max={gop} ! \
-             h265parse ! rtph265pay name={pay} pt=96 config-interval=-1 mtu={mtu}"
-        ),
-        (_, Codec::Mjpeg) => format!(
-            "videoconvert ! video/x-raw,format=I420 ! jpegenc quality={} ! rtpjpegpay name={pay} pt=26 mtu={mtu}",
-            a.jpeg_quality
-        ),
-        (Encoder::Auto, _) => return Err(anyhow!("encoder not resolved")),
+        (Encoder::Software, _) => {
+            format!("videoconvert ! x265enc tune=zerolatency speed-preset=veryfast bitrate={kbps} key-int-max={gop}")
+        }
+        (Encoder::Auto, _) => unreachable!("the encoder is resolved first"),
     };
-    let tail = if a.onvif { " ! rtponviftimestamp name=pay0" } else { "" };
-    Ok(format!("( {head} ! {body}{tail} )"))
+    let (pay, mtu) = (if a.onvif { "pay" } else { "pay0" }, a.mtu);
+    let payloader = match a.codec {
+        Codec::Mjpeg => format!("rtpjpegpay name={pay} pt=26 mtu={mtu}"),
+        _ => format!("{codec}parse ! rtp{codec}pay name={pay} pt=96 config-interval=-1 mtu={mtu}"),
+    };
+    let onvif = if a.onvif { " ! rtponviftimestamp name=pay0" } else { "" };
+    format!("( appsrc name=src is-live=true format=time caps=\"{caps}\" ! {encoder} ! {payloader}{onvif} )")
 }
 
 fn resolve_encoder(a: &Args) -> Encoder {
@@ -227,7 +213,7 @@ fn main() -> Result<()> {
     prof::start();
     gst::init()?;
     let enc = resolve_encoder(&a);
-    let desc = pipeline_desc(&a, enc)?;
+    let desc = pipeline_desc(&a, enc);
     gst::parse::launch(&desc).with_context(|| format!("cannot build the camera pipeline {desc}"))?;
     let mut generator = gen::Generator::new(a.width, a.height)?;
     let period = Duration::from_nanos(1_000_000_000 / a.fps as u64);
