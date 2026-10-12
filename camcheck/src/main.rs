@@ -264,6 +264,16 @@ struct Summary {
     fps: f64,
 }
 
+impl Summary {
+    fn delivered_pct(&self) -> f64 {
+        if self.span > 0 {
+            100.0 * self.distinct as f64 / self.span as f64
+        } else {
+            0.0
+        }
+    }
+}
+
 fn summarize(cam: u32, recs: &[Rec], t_from: u64, t_to: u64) -> Summary {
     let mut s = Summary { cam, ..Default::default() };
     let mut seen = std::collections::BTreeMap::new();
@@ -392,7 +402,7 @@ fn report(args: &Args, cams: &[u32], recs: &Arc<Vec<Mutex<Vec<Rec>>>>, t_from: u
             for r in recs[k].lock().unwrap().iter() {
                 match r.result {
                     Ok(id) => writeln!(out, "{cam},{},{},{},{},", r.arrival_us, id.camera, id.frame, id.capture_us)?,
-                    Err(e) => writeln!(out, "{cam},{},,,,{e:?}", r.arrival_us)?,
+                    Err(e) => writeln!(out, "{cam},{},,,,\"{}\"", r.arrival_us, format!("{e:?}").replace('"', "\"\""))?,
                 }
             }
         }
@@ -404,20 +414,20 @@ fn report(args: &Args, cams: &[u32], recs: &Arc<Vec<Mutex<Vec<Rec>>>>, t_from: u
         "{:>4} {:>7} {:>8} {:>6} {:>5} {:>6} {:>6} {:>6} {:>7} {:>9} {:>9}",
         "cam", "fps", "distinct", "lost", "rep", "back", "unread", "wrong", "deliv%", "lat med", "lat p95"
     );
-    let mut json = String::from("[\n");
+    let mut json = Vec::with_capacity(sums.len());
     for s in &sums {
-        let deliv = if s.span > 0 { 100.0 * s.distinct as f64 / s.span as f64 } else { 0.0 };
+        let deliv = s.delivered_pct();
         let (lm, lp) = if file_mode { (f64::NAN, f64::NAN) } else { (pct(&s.lat_ms, 0.5), pct(&s.lat_ms, 0.95)) };
         println!(
             "{:>4} {:>7.2} {:>8} {:>6} {:>5} {:>6} {:>6} {:>6} {:>7.2} {:>9.1} {:>9.1}",
             s.cam, s.fps, s.distinct, s.lost, s.repeated, s.backwards, s.unreadable, s.wrong_camera, deliv, lm, lp
         );
-        let _ = writeln!(
-            json,
+        json.push(format!(
             "  {{\"camera\": {}, \"fps\": {:.3}, \"samples\": {}, \"distinct\": {}, \"span\": {}, \"lost\": {}, \"repeated\": {}, \
-             \"backwards\": {}, \"unreadable\": {}, \"wrong_camera\": {}, \"delivered_pct\": {:.3}, \"lat_median_ms\": {:.2}, \"lat_p95_ms\": {:.2}}},",
-            s.cam, s.fps, s.samples, s.distinct, s.span, s.lost, s.repeated, s.backwards, s.unreadable, s.wrong_camera, deliv, lm, lp
-        );
+             \"backwards\": {}, \"unreadable\": {}, \"wrong_camera\": {}, \"delivered_pct\": {:.3}, \"lat_median_ms\": {}, \"lat_p95_ms\": {}}}",
+            s.cam, s.fps, s.samples, s.distinct, s.span, s.lost, s.repeated, s.backwards, s.unreadable, s.wrong_camera, deliv,
+            json_ms(lm), json_ms(lp)
+        ));
     }
     let mut all_lat: Vec<f64> = sums.iter().flat_map(|s| s.lat_ms.iter().copied()).collect();
     all_lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -438,12 +448,18 @@ fn report(args: &Args, cams: &[u32], recs: &Arc<Vec<Mutex<Vec<Rec>>>>, t_from: u
         total(|s| s.backwards),
         total(|s| s.unreadable),
         total(|s| s.wrong_camera),
-        sums.iter().filter(|s| s.span > 0).map(|s| 100.0 * s.distinct as f64 / s.span as f64).fold(f64::INFINITY, f64::min)
+        sums.iter().map(Summary::delivered_pct).fold(f64::INFINITY, f64::min)
     );
     if let Some(path) = &args.json {
-        json.truncate(json.trim_end_matches(",\n").len());
-        json.push_str("\n]\n");
-        std::fs::write(path, json)?;
+        std::fs::write(path, format!("[\n{}\n]\n", json.join(",\n")))?;
     }
     Ok(())
+}
+
+fn json_ms(v: f64) -> String {
+    if v.is_finite() {
+        format!("{v:.2}")
+    } else {
+        "null".into()
+    }
 }
