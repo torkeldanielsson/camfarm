@@ -10,7 +10,7 @@
 //! backwards (an older picture shown after a newer one), unreadable, pictures of the wrong camera, and the latency
 //! from the capture time in the code to the arrival here (sender and receiver clocks must be in sync, e.g. NTP).
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use framecode::{DecodeError, FrameId};
 use gst::prelude::*;
@@ -33,7 +33,7 @@ struct Args {
     /// first camera id
     #[arg(long, global = true, default_value_t = 1)]
     first: u32,
-    #[arg(long, global = true, default_value_t = 32)]
+    #[arg(long, global = true, default_value_t = 32, value_parser = clap::value_parser!(u32).range(1..))]
     count: u32,
     /// measurement time after the warm-up
     #[arg(long, global = true, default_value_t = 30.0)]
@@ -82,7 +82,22 @@ enum Mode {
 
 struct Rec {
     arrival_us: u64,
-    result: Result<FrameId, DecodeError>,
+    result: Result<FrameId, ReadError>,
+}
+
+#[derive(Debug)]
+enum ReadError {
+    Code(DecodeError),
+    Picture(String),
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            ReadError::Code(e) => write!(f, "{e:?}"),
+            ReadError::Picture(e) => f.write_str(e),
+        }
+    }
 }
 
 fn now_us() -> u64 {
@@ -153,6 +168,10 @@ mod cuda {
         .map_err(|e| e.clone())
     }
 
+    pub fn load() -> Result<(), String> {
+        api().map(|_| ())
+    }
+
     /// Copy `rows` rows (`width` bytes each) of plane 0 of a CUDA memory buffer to host memory.
     pub fn copy_band(
         buffer: &gst::BufferRef,
@@ -211,25 +230,25 @@ mod cuda {
 fn pipeline_for(mode: &Mode, cam: u32, k: usize) -> String {
     match mode {
         Mode::Rtsp { url_base, tcp } => format!(
-            "rtspsrc location={url_base}{cam:02} protocols={} latency=0 ! decodebin ! {} ! \
-             video/x-raw,format=GRAY8 ! appsink name=sink{k} sync=false max-buffers=16 drop=false",
+            "rtspsrc name=cam{cam:02} location={url_base}{cam:02} protocols={} latency=0 ! decodebin name=decode{cam:02} ! \
+             {} ! video/x-raw,format=GRAY8 ! appsink name=sink{k} sync=false max-buffers=16 drop=false",
             if *tcp { "tcp" } else { "udp" },
             // Jetson hardware decoders output NVMM memory, which only nvvidconv can read
             if gst::ElementFactory::find("nvvidconv").is_some() { "nvvidconv" } else { "videoconvert" }
         ),
         Mode::CudaIpc { path_base } => format!(
-            "cudaipcsrc address={path_base}{cam:02} ! appsink name=sink{k} sync=false max-buffers=16 drop=false \
-             caps=video/x-raw(memory:CUDAMemory)"
+            "cudaipcsrc name=cam{cam:02} address={path_base}{cam:02} ! appsink name=sink{k} sync=false max-buffers=16 \
+             drop=false caps=video/x-raw(memory:CUDAMemory)"
         ),
         Mode::Grid { .. } => unreachable!(),
     }
 }
 
-fn decode_sample(sample: &gst::Sample, cuda: bool) -> Result<FrameId, DecodeError> {
-    let bad = Err(DecodeError::NoContrast { black: 0.0, white: 0.0 });
-    let Some(buffer) = sample.buffer() else { return bad };
-    let Some(caps) = sample.caps() else { return bad };
-    let Ok(vinfo) = gst_video::VideoInfo::from_caps(caps) else { return bad };
+fn decode_sample(sample: &gst::Sample, cuda: bool) -> Result<FrameId, ReadError> {
+    let picture_error = |e: &str| ReadError::Picture(e.into());
+    let buffer = sample.buffer().ok_or_else(|| picture_error("no buffer"))?;
+    let caps = sample.caps().ok_or_else(|| picture_error("no caps"))?;
+    let vinfo = gst_video::VideoInfo::from_caps(caps).map_err(|_| picture_error("not raw video"))?;
     let (w, h) = (vinfo.width(), vinfo.height());
     let (offset, stride) = match buffer.meta::<gst_video::VideoMeta>() {
         Some(m) => (m.offset()[0], m.stride()[0] as usize),
@@ -237,16 +256,20 @@ fn decode_sample(sample: &gst::Sample, cuda: bool) -> Result<FrameId, DecodeErro
     };
     let rows = framecode::Geometry::for_picture(w, h).band_rows() as usize;
     if cuda {
-        return match cuda::copy_band(buffer, offset, stride, w as usize, rows) {
-            Ok(band) => framecode::decode(&band, w as usize, w, h),
-            Err(e) => {
-                eprintln!("{e}");
-                bad
-            }
-        };
+        let band = cuda::copy_band(buffer, offset, stride, w as usize, rows).map_err(ReadError::Picture)?;
+        return framecode::decode(&band, w as usize, w, h).map_err(ReadError::Code);
     }
-    let Ok(map) = buffer.map_readable() else { return bad };
-    framecode::decode(&map[offset..offset + stride * rows], stride, w, h)
+    let map = buffer.map_readable().map_err(|_| picture_error("cannot map the buffer"))?;
+    let band = map.get(offset..offset + stride * rows).ok_or_else(|| picture_error("buffer smaller than its caps"))?;
+    framecode::decode(band, stride, w, h).map_err(ReadError::Code)
+}
+
+fn error_text(message: &gst::Message) -> Option<String> {
+    let gst::MessageView::Error(e) = message.view() else { return None };
+    let src = e.src().map(|s| s.path_string().to_string()).unwrap_or_default();
+    let detail =
+        e.debug().and_then(|d| d.split_once('\n').map(|(_, d)| format!(" ({})", d.trim()))).unwrap_or_default();
+    Some(format!("{src}: {}{detail}", e.error()))
 }
 
 #[derive(Default)]
@@ -330,32 +353,63 @@ fn main() -> Result<()> {
     let args = Args::parse();
     gst::init()?;
     let cuda = matches!(args.mode, Mode::CudaIpc { .. });
+    if cuda {
+        cuda::load().map_err(|e| anyhow!("cuda-ipc needs the NVIDIA driver and GStreamer's CUDA library: {e}"))?;
+    }
     let cams: Vec<u32> = (args.first..args.first + args.count).collect();
     let recs: Arc<Vec<Mutex<Vec<Rec>>>> = Arc::new(cams.iter().map(|_| Mutex::new(Vec::new())).collect());
 
     if let Mode::Grid { file, cols, cell_w, cell_h, fps } = &args.mode {
-        let pipeline = gst::parse::launch(&format!(
-            "filesrc location={file} ! parsebin ! decodebin ! videoconvert ! video/x-raw,format=GRAY8 ! \
-             appsink name=sink sync=false max-buffers=4 drop=false"
-        ))?
+        let pipeline = gst::parse::launch(
+            "filesrc name=file ! parsebin ! decodebin ! videoconvert ! video/x-raw,format=GRAY8 ! \
+             appsink name=sink sync=false max-buffers=4 drop=false",
+        )?
         .downcast::<gst::Pipeline>()
         .map_err(|_| anyhow!("not a pipeline"))?;
+        pipeline.by_name("file").unwrap().set_property("location", file);
         let sink = pipeline.by_name("sink").unwrap().downcast::<gst_app::AppSink>().unwrap();
-        pipeline.set_state(gst::State::Playing)?;
+        let bus = pipeline.bus().context("pipeline without a bus")?;
+        let stop = |e: String| {
+            let _ = pipeline.set_state(gst::State::Null);
+            anyhow!("cannot read {file}: {e}")
+        };
+        if pipeline.set_state(gst::State::Playing).is_err() {
+            return Err(stop(
+                bus.pop_filtered(&[gst::MessageType::Error]).as_ref().and_then(error_text).unwrap_or_default(),
+            ));
+        }
         let mut index = 0u64;
-        while let Ok(sample) = sink.pull_sample() {
+        loop {
+            // an error stops the stream without an EOS, so pull_sample alone would wait forever
+            let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(100)) else {
+                if sink.is_eos() {
+                    break;
+                }
+                match bus.pop_filtered(&[gst::MessageType::Error]).as_ref().and_then(error_text) {
+                    Some(e) if index == 0 => return Err(stop(e)),
+                    Some(e) => {
+                        eprintln!("camcheck: {e}");
+                        break;
+                    }
+                    None => continue,
+                }
+            };
             let (Some(buffer), Some(caps)) = (sample.buffer(), sample.caps()) else { continue };
             let Ok(vinfo) = gst_video::VideoInfo::from_caps(caps) else { continue };
             let stride = vinfo.stride()[0] as usize;
             let Ok(map) = buffer.map_readable() else { continue };
             let t = (index as f64 * 1e6 / fps) as u64;
-            for (k, _) in cams.iter().enumerate() {
+            for (k, &cam) in cams.iter().enumerate() {
                 let (x0, y0) = ((k as u32 % cols) * cell_w, (k as u32 / cols) * cell_h);
-                if y0 + cell_h > vinfo.height() {
-                    continue;
+                if x0 + cell_w > vinfo.width() || y0 + cell_h > vinfo.height() {
+                    return Err(stop(format!(
+                        "camera {cam}'s cell at {x0},{y0} is outside the {}x{} video (check --cols, --cell-w, --cell-h)",
+                        vinfo.width(),
+                        vinfo.height()
+                    )));
                 }
                 let start = y0 as usize * stride + x0 as usize;
-                let result = framecode::decode(&map[start..], stride, *cell_w, *cell_h);
+                let result = framecode::decode(&map[start..], stride, *cell_w, *cell_h).map_err(ReadError::Code);
                 recs[k].lock().unwrap().push(Rec { arrival_us: t, result });
             }
             index += 1;
@@ -368,6 +422,12 @@ fn main() -> Result<()> {
     // One pipeline for all cameras, so all CUDA IPC readers share one CUDA context.
     let desc = cams.iter().enumerate().map(|(k, &cam)| pipeline_for(&args.mode, cam, k)).collect::<Vec<_>>().join(" ");
     let pipeline = gst::parse::launch(&desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
+    pipeline.bus().context("pipeline without a bus")?.set_sync_handler(|_, message| {
+        if let Some(e) = error_text(message) {
+            eprintln!("camcheck: {e}");
+        }
+        gst::BusSyncReply::Drop
+    });
     for (k, _) in cams.iter().enumerate() {
         let sink = pipeline.by_name(&format!("sink{k}")).unwrap().downcast::<gst_app::AppSink>().unwrap();
         let recs_c = recs.clone();
@@ -383,7 +443,10 @@ fn main() -> Result<()> {
                 .build(),
         );
     }
-    pipeline.set_state(gst::State::Playing)?;
+    if pipeline.set_state(gst::State::Playing).is_err() {
+        let _ = pipeline.set_state(gst::State::Null);
+        bail!("cannot start the pipeline");
+    }
     let start = Instant::now();
     let t_from = now_us() + (args.warmup * 1e6) as u64;
     let t_to = t_from + (args.seconds * 1e6) as u64;
@@ -402,11 +465,13 @@ fn report(args: &Args, cams: &[u32], recs: &Arc<Vec<Mutex<Vec<Rec>>>>, t_from: u
             for r in recs[k].lock().unwrap().iter() {
                 match r.result {
                     Ok(id) => writeln!(out, "{cam},{},{},{},{},", r.arrival_us, id.camera, id.frame, id.capture_us)?,
-                    Err(e) => writeln!(out, "{cam},{},,,,\"{}\"", r.arrival_us, format!("{e:?}").replace('"', "\"\""))?,
+                    Err(ref e) => {
+                        writeln!(out, "{cam},{},,,,\"{}\"", r.arrival_us, e.to_string().replace('"', "\"\""))?
+                    }
                 }
             }
         }
-        std::fs::write(path, out)?;
+        std::fs::write(path, out).with_context(|| format!("cannot write {path}"))?;
     }
     let sums: Vec<Summary> =
         cams.iter().enumerate().map(|(k, &cam)| summarize(cam, &recs[k].lock().unwrap(), t_from, t_to)).collect();
@@ -451,7 +516,8 @@ fn report(args: &Args, cams: &[u32], recs: &Arc<Vec<Mutex<Vec<Rec>>>>, t_from: u
         sums.iter().map(Summary::delivered_pct).fold(f64::INFINITY, f64::min)
     );
     if let Some(path) = &args.json {
-        std::fs::write(path, format!("[\n{}\n]\n", json.join(",\n")))?;
+        std::fs::write(path, format!("[\n{}\n]\n", json.join(",\n")))
+            .with_context(|| format!("cannot write {path}"))?;
     }
     Ok(())
 }
