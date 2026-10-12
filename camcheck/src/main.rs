@@ -7,7 +7,7 @@ use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
 #[command(
@@ -53,19 +53,22 @@ enum Mode {
         path_base: String,
     },
     /// decode a recorded video (H.264/H.265 elementary stream or any container) with the cameras tiled in a grid
-    Grid {
-        #[arg(long)]
-        file: String,
-        #[arg(long, default_value_t = 8)]
-        cols: u32,
-        #[arg(long, default_value_t = 960)]
-        cell_w: u32,
-        #[arg(long, default_value_t = 540)]
-        cell_h: u32,
-        /// frame rate of the recording, for the time axis (latency is not meaningful for a file)
-        #[arg(long, default_value_t = 15.0)]
-        fps: f64,
-    },
+    Grid(Grid),
+}
+
+#[derive(clap::Args)]
+struct Grid {
+    #[arg(long)]
+    file: String,
+    #[arg(long, default_value_t = 8)]
+    cols: u32,
+    #[arg(long, default_value_t = 960)]
+    cell_w: u32,
+    #[arg(long, default_value_t = 540)]
+    cell_h: u32,
+    /// frame rate of the recording, for the time axis (latency is not meaningful for a file)
+    #[arg(long, default_value_t = 15.0)]
+    fps: f64,
 }
 
 struct Rec {
@@ -228,7 +231,7 @@ fn pipeline_for(mode: &Mode, cam: u32, k: usize) -> String {
             "cudaipcsrc name=cam{cam:02} address={path_base}{cam:02} ! appsink name=sink{k} sync=false max-buffers=16 \
              drop=false caps=video/x-raw(memory:CUDAMemory)"
         ),
-        Mode::Grid { .. } => unreachable!(),
+        Mode::Grid(_) => unreachable!("grid mode reads a file"),
     }
 }
 
@@ -324,7 +327,7 @@ fn summarize(cam: u32, recs: &[Rec], t_from: u64, t_to: u64) -> Summary {
         s.lost = s.span - s.distinct as u64;
     }
     s.lat_ms = seen.values().copied().collect();
-    s.lat_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    s.lat_ms.sort_by(f64::total_cmp);
     s.fps = s.samples as f64 / ((t_to - t_from) as f64 / 1e6);
     s
 }
@@ -340,73 +343,82 @@ fn pct(v: &[f64], p: f64) -> f64 {
 fn main() -> Result<()> {
     let args = Args::parse();
     gst::init()?;
+    let cams: Vec<u32> = (args.first..args.first + args.count).collect();
+    let recs: Arc<Vec<Mutex<Vec<Rec>>>> = Arc::new(cams.iter().map(|_| Mutex::new(Vec::new())).collect());
+    let (t_from, t_to) = match &args.mode {
+        Mode::Grid(grid) => read_grid(grid, args.warmup, &cams, &recs)?,
+        _ => read_live(&args, &cams, &recs)?,
+    };
+    report(&args, &cams, &recs, t_from, t_to)
+}
+
+/// Reads every cell of every picture of the recording; returns the measurement window on the recording's time axis.
+fn read_grid(grid: &Grid, warmup: f64, cams: &[u32], recs: &[Mutex<Vec<Rec>>]) -> Result<(u64, u64)> {
+    let Grid { file, cols, cell_w, cell_h, fps } = grid;
+    let pipeline = gst::parse::launch(
+        "filesrc name=file ! parsebin ! decodebin ! videoconvert ! video/x-raw,format=GRAY8 ! \
+         appsink name=sink sync=false max-buffers=4 drop=false",
+    )?
+    .downcast::<gst::Pipeline>()
+    .map_err(|_| anyhow!("not a pipeline"))?;
+    pipeline.by_name("file").unwrap().set_property("location", file);
+    let sink = pipeline.by_name("sink").unwrap().downcast::<gst_app::AppSink>().unwrap();
+    let bus = pipeline.bus().context("pipeline without a bus")?;
+    let stop = |e: String| {
+        let _ = pipeline.set_state(gst::State::Null);
+        anyhow!("cannot read {file}: {e}")
+    };
+    if pipeline.set_state(gst::State::Playing).is_err() {
+        return Err(stop(
+            bus.pop_filtered(&[gst::MessageType::Error]).as_ref().and_then(error_text).unwrap_or_default(),
+        ));
+    }
+    let mut index = 0u64;
+    loop {
+        // an error stops the stream without an EOS, so pull_sample alone would wait forever
+        let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(100)) else {
+            if sink.is_eos() {
+                break;
+            }
+            match bus.pop_filtered(&[gst::MessageType::Error]).as_ref().and_then(error_text) {
+                Some(e) if index == 0 => return Err(stop(e)),
+                Some(e) => {
+                    eprintln!("camcheck: {e}");
+                    break;
+                }
+                None => continue,
+            }
+        };
+        let (Some(buffer), Some(caps)) = (sample.buffer(), sample.caps()) else { continue };
+        let Ok(vinfo) = gst_video::VideoInfo::from_caps(caps) else { continue };
+        let stride = vinfo.stride()[0] as usize;
+        let Ok(map) = buffer.map_readable() else { continue };
+        let t = (index as f64 * 1e6 / fps) as u64;
+        for (k, &cam) in cams.iter().enumerate() {
+            let (x0, y0) = ((k as u32 % cols) * cell_w, (k as u32 / cols) * cell_h);
+            if x0 + cell_w > vinfo.width() || y0 + cell_h > vinfo.height() {
+                return Err(stop(format!(
+                    "camera {cam}'s cell at {x0},{y0} is outside the {}x{} video (check --cols, --cell-w, --cell-h)",
+                    vinfo.width(),
+                    vinfo.height()
+                )));
+            }
+            let start = y0 as usize * stride + x0 as usize;
+            let result = framecode::decode(&map[start..], stride, *cell_w, *cell_h).map_err(ReadError::Code);
+            recs[k].lock().unwrap().push(Rec { arrival_us: t, result });
+        }
+        index += 1;
+    }
+    let _ = pipeline.set_state(gst::State::Null);
+    Ok(((warmup * 1e6) as u64, (index as f64 * 1e6 / fps) as u64 + 1))
+}
+
+/// Reads the cameras for the warm-up plus the measurement time; returns the measurement window in Unix microseconds.
+fn read_live(args: &Args, cams: &[u32], recs: &Arc<Vec<Mutex<Vec<Rec>>>>) -> Result<(u64, u64)> {
     let cuda = matches!(args.mode, Mode::CudaIpc { .. });
     if cuda {
         cuda::load().map_err(|e| anyhow!("cuda-ipc needs the NVIDIA driver and GStreamer's CUDA library: {e}"))?;
     }
-    let cams: Vec<u32> = (args.first..args.first + args.count).collect();
-    let recs: Arc<Vec<Mutex<Vec<Rec>>>> = Arc::new(cams.iter().map(|_| Mutex::new(Vec::new())).collect());
-
-    if let Mode::Grid { file, cols, cell_w, cell_h, fps } = &args.mode {
-        let pipeline = gst::parse::launch(
-            "filesrc name=file ! parsebin ! decodebin ! videoconvert ! video/x-raw,format=GRAY8 ! \
-             appsink name=sink sync=false max-buffers=4 drop=false",
-        )?
-        .downcast::<gst::Pipeline>()
-        .map_err(|_| anyhow!("not a pipeline"))?;
-        pipeline.by_name("file").unwrap().set_property("location", file);
-        let sink = pipeline.by_name("sink").unwrap().downcast::<gst_app::AppSink>().unwrap();
-        let bus = pipeline.bus().context("pipeline without a bus")?;
-        let stop = |e: String| {
-            let _ = pipeline.set_state(gst::State::Null);
-            anyhow!("cannot read {file}: {e}")
-        };
-        if pipeline.set_state(gst::State::Playing).is_err() {
-            return Err(stop(
-                bus.pop_filtered(&[gst::MessageType::Error]).as_ref().and_then(error_text).unwrap_or_default(),
-            ));
-        }
-        let mut index = 0u64;
-        loop {
-            // an error stops the stream without an EOS, so pull_sample alone would wait forever
-            let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(100)) else {
-                if sink.is_eos() {
-                    break;
-                }
-                match bus.pop_filtered(&[gst::MessageType::Error]).as_ref().and_then(error_text) {
-                    Some(e) if index == 0 => return Err(stop(e)),
-                    Some(e) => {
-                        eprintln!("camcheck: {e}");
-                        break;
-                    }
-                    None => continue,
-                }
-            };
-            let (Some(buffer), Some(caps)) = (sample.buffer(), sample.caps()) else { continue };
-            let Ok(vinfo) = gst_video::VideoInfo::from_caps(caps) else { continue };
-            let stride = vinfo.stride()[0] as usize;
-            let Ok(map) = buffer.map_readable() else { continue };
-            let t = (index as f64 * 1e6 / fps) as u64;
-            for (k, &cam) in cams.iter().enumerate() {
-                let (x0, y0) = ((k as u32 % cols) * cell_w, (k as u32 / cols) * cell_h);
-                if x0 + cell_w > vinfo.width() || y0 + cell_h > vinfo.height() {
-                    return Err(stop(format!(
-                        "camera {cam}'s cell at {x0},{y0} is outside the {}x{} video (check --cols, --cell-w, --cell-h)",
-                        vinfo.width(),
-                        vinfo.height()
-                    )));
-                }
-                let start = y0 as usize * stride + x0 as usize;
-                let result = framecode::decode(&map[start..], stride, *cell_w, *cell_h).map_err(ReadError::Code);
-                recs[k].lock().unwrap().push(Rec { arrival_us: t, result });
-            }
-            index += 1;
-        }
-        let _ = pipeline.set_state(gst::State::Null);
-        let t_to = (index as f64 * 1e6 / fps) as u64 + 1;
-        return report(&args, &cams, &recs, (args.warmup * 1e6) as u64, t_to);
-    }
-
     // An error while a pipeline starts (one refused camera) stops the whole pipeline, so every RTSP camera gets its
     // own; CUDA IPC readers share one pipeline, so they share one CUDA context.
     let descs: Vec<String> = cams.iter().enumerate().map(|(k, &cam)| pipeline_for(&args.mode, cam, k)).collect();
@@ -422,17 +434,17 @@ fn main() -> Result<()> {
         });
         pipelines.push(pipeline);
     }
-    for (k, _) in cams.iter().enumerate() {
+    for k in 0..cams.len() {
         let sink = pipelines.iter().find_map(|p| p.by_name(&format!("sink{k}"))).unwrap();
         let sink = sink.downcast::<gst_app::AppSink>().unwrap();
-        let recs_c = recs.clone();
+        let recs = recs.clone();
         sink.set_callbacks(
             gst_app::AppSinkCallbacks::builder()
                 .new_sample(move |sink| {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                     let arrival_us = now_us();
                     let result = decode_sample(&sample, cuda);
-                    recs_c[k].lock().unwrap().push(Rec { arrival_us, result });
+                    recs[k].lock().unwrap().push(Rec { arrival_us, result });
                     Ok(gst::FlowSuccess::Ok)
                 })
                 .build(),
@@ -443,20 +455,16 @@ fn main() -> Result<()> {
             eprintln!("camcheck: {} did not start", pipeline.name());
         }
     }
-    let start = Instant::now();
     let t_from = now_us() + (args.warmup * 1e6) as u64;
-    let t_to = t_from + (args.seconds * 1e6) as u64;
-    while start.elapsed() < Duration::from_secs_f64(args.warmup + args.seconds + 0.2) {
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    std::thread::sleep(Duration::from_secs_f64(args.warmup + args.seconds + 0.2));
     for pipeline in &pipelines {
         let _ = pipeline.set_state(gst::State::Null);
     }
-    report(&args, &cams, &recs, t_from, t_to)
+    Ok((t_from, t_from + (args.seconds * 1e6) as u64))
 }
 
-fn report(args: &Args, cams: &[u32], recs: &Arc<Vec<Mutex<Vec<Rec>>>>, t_from: u64, t_to: u64) -> Result<()> {
-    let file_mode = matches!(args.mode, Mode::Grid { .. });
+fn report(args: &Args, cams: &[u32], recs: &[Mutex<Vec<Rec>>], t_from: u64, t_to: u64) -> Result<()> {
+    let file_mode = matches!(args.mode, Mode::Grid(_));
     if let Some(path) = &args.csv {
         let mut out = String::from("camera,arrival_us,frame_camera,frame,capture_us,error\n");
         for (k, &cam) in cams.iter().enumerate() {
@@ -493,7 +501,7 @@ fn report(args: &Args, cams: &[u32], recs: &Arc<Vec<Mutex<Vec<Rec>>>>, t_from: u
         ));
     }
     let mut all_lat: Vec<f64> = sums.iter().flat_map(|s| s.lat_ms.iter().copied()).collect();
-    all_lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    all_lat.sort_by(f64::total_cmp);
     let (distinct, span, lost) =
         sums.iter().fold((0usize, 0u64, 0u64), |a, s| (a.0 + s.distinct, a.1 + s.span, a.2 + s.lost));
     let total = |f: fn(&Summary) -> usize| sums.iter().map(f).sum::<usize>();
