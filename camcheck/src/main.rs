@@ -232,8 +232,7 @@ fn pipeline_for(mode: &Mode, cam: u32, k: usize) -> String {
             "rtspsrc name=cam{cam:02} location={url_base}{cam:02} protocols={} latency=0 ! decodebin name=decode{cam:02} ! \
              {} ! video/x-raw,format=GRAY8 ! appsink name=sink{k} sync=false max-buffers=16 drop=false",
             if *tcp { "tcp" } else { "udp" },
-            // Jetson hardware decoders output NVMM memory, which only nvvidconv can read
-            if gst::ElementFactory::find("nvvidconv").is_some() { "nvvidconv" } else { "videoconvert" }
+            gray8_converter()
         ),
         Mode::CudaIpc { path_base } => format!(
             "cudaipcsrc name=cam{cam:02} address={path_base}{cam:02} ! appsink name=sink{k} sync=false max-buffers=16 \
@@ -243,16 +242,30 @@ fn pipeline_for(mode: &Mode, cam: u32, k: usize) -> String {
     }
 }
 
+/// Jetson hardware decoders output NVMM memory, which only nvvidconv can read.
+fn gray8_converter() -> &'static str {
+    if gst::ElementFactory::find("nvvidconv").is_some() {
+        "nvvidconv"
+    } else {
+        "videoconvert"
+    }
+}
+
+/// Offset and stride of the luma plane.
+fn luma_plane(buffer: &gst::BufferRef, vinfo: &gst_video::VideoInfo) -> (usize, usize) {
+    match buffer.meta::<gst_video::VideoMeta>() {
+        Some(m) => (m.offset()[0], m.stride()[0] as usize),
+        None => (vinfo.offset()[0], vinfo.stride()[0] as usize),
+    }
+}
+
 fn decode_sample(sample: &gst::Sample, cuda_band: Option<&mut Vec<u8>>) -> Result<FrameId, ReadError> {
     let picture_error = |e: &str| ReadError::Picture(e.into());
     let buffer = sample.buffer().ok_or_else(|| picture_error("no buffer"))?;
     let caps = sample.caps().ok_or_else(|| picture_error("no caps"))?;
     let vinfo = gst_video::VideoInfo::from_caps(caps).map_err(|_| picture_error("not raw video"))?;
     let (w, h) = (vinfo.width(), vinfo.height());
-    let (offset, stride) = match buffer.meta::<gst_video::VideoMeta>() {
-        Some(m) => (m.offset()[0], m.stride()[0] as usize),
-        None => (vinfo.offset()[0], vinfo.stride()[0] as usize),
-    };
+    let (offset, stride) = luma_plane(buffer, &vinfo);
     let rows = framecode::Geometry::for_picture(w, h).band_rows() as usize;
     if let Some(band) = cuda_band {
         cuda::copy_band(buffer, offset, stride, w as usize, rows, band).map_err(ReadError::Picture)?;
@@ -363,10 +376,11 @@ fn main() -> Result<()> {
 /// Reads every cell of every picture of the recording; returns the measurement window on the recording's time axis.
 fn read_grid(grid: &Grid, warmup: f64, cams: &[u32], recs: &[Mutex<Vec<Rec>>]) -> Result<(u64, u64)> {
     let Grid { file, cols, cell_w, cell_h, fps } = grid;
-    let pipeline = gst::parse::launch(
-        "filesrc name=file ! parsebin ! decodebin ! videoconvert ! video/x-raw,format=GRAY8 ! \
+    let pipeline = gst::parse::launch(&format!(
+        "filesrc name=file ! parsebin ! decodebin ! {} ! video/x-raw,format=GRAY8 ! \
          appsink name=sink sync=false max-buffers=4 drop=false",
-    )?
+        gray8_converter()
+    ))?
     .downcast::<gst::Pipeline>()
     .map_err(|_| anyhow!("not a pipeline"))?;
     pipeline.by_name("file").unwrap().set_property("location", file);
@@ -382,24 +396,18 @@ fn read_grid(grid: &Grid, warmup: f64, cams: &[u32], recs: &[Mutex<Vec<Rec>>]) -
         ));
     }
     let mut index = 0u64;
-    loop {
-        // an error stops the stream without an EOS, so pull_sample alone would wait forever
+    let error = loop {
+        // an error does not always end the stream with an EOS, so pull_sample alone could wait forever
         let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(100)) else {
-            if sink.is_eos() {
-                break;
+            let error = bus.pop_filtered(&[gst::MessageType::Error]).as_ref().and_then(error_text);
+            if error.is_some() || sink.is_eos() {
+                break error;
             }
-            match bus.pop_filtered(&[gst::MessageType::Error]).as_ref().and_then(error_text) {
-                Some(e) if index == 0 => return Err(stop(e)),
-                Some(e) => {
-                    eprintln!("camcheck: {e}");
-                    break;
-                }
-                None => continue,
-            }
+            continue;
         };
         let (Some(buffer), Some(caps)) = (sample.buffer(), sample.caps()) else { continue };
         let Ok(vinfo) = gst_video::VideoInfo::from_caps(caps) else { continue };
-        let stride = vinfo.stride()[0] as usize;
+        let (offset, stride) = luma_plane(buffer, &vinfo);
         let Ok(map) = buffer.map_readable() else { continue };
         let t = (index as f64 * 1e6 / fps) as u64;
         for (k, &cam) in cams.iter().enumerate() {
@@ -411,11 +419,16 @@ fn read_grid(grid: &Grid, warmup: f64, cams: &[u32], recs: &[Mutex<Vec<Rec>>]) -
                     vinfo.height()
                 )));
             }
-            let start = y0 as usize * stride + x0 as usize;
+            let start = offset + y0 as usize * stride + x0 as usize;
             let result = framecode::decode(&map[start..], stride, *cell_w, *cell_h).map_err(ReadError::Code);
             recs[k].lock().unwrap().push(Rec { arrival_us: t, result });
         }
         index += 1;
+    };
+    match (index, error) {
+        (0, error) => return Err(stop(error.unwrap_or_else(|| "no pictures decoded".into()))),
+        (_, Some(e)) => eprintln!("camcheck: {e}"),
+        _ => {}
     }
     let _ = pipeline.set_state(gst::State::Null);
     Ok(((warmup * 1e6) as u64, (index as f64 * 1e6 / fps) as u64 + 1))
