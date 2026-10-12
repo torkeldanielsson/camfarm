@@ -31,7 +31,7 @@ central half.
 | 8..16    | camera id                                                 |
 | 16..48   | frame number                                              |
 | 48..96   | capture time, microseconds since the Unix epoch, low 48 bits |
-| 96..112  | CRC-16/CCITT-FALSE of the payload                         |
+| 96..112  | CRC-16/CCITT-FALSE of camera id, frame number, capture time and both sync bytes (13 bytes) |
 | 112..120 | sync pattern 01010011                                     |
 
 ![The frame code band of one 1280x720 picture](docs/images/band-720p-h264-646kbps.png)
@@ -89,6 +89,14 @@ Download a release for your platform from the [releases page](https://github.com
 | `camfarm-<version>-aarch64-ubuntu24.04.tar.gz` | NVIDIA Jetson with JetPack 7 (and other arm64 Ubuntu 24.04) |
 | `camfarm-<version>-aarch64-ubuntu22.04.tar.gz` | NVIDIA Jetson with JetPack 6 (and other arm64 Ubuntu 22.04) |
 
+Each archive holds the `camfarm` and `camcheck` binaries:
+
+```sh
+tar xzf camfarm-<version>-x86_64-ubuntu24.04.tar.gz
+cd camfarm-<version>-x86_64-ubuntu24.04
+./camfarm --cameras 4
+```
+
 Runtime packages:
 
 ```sh
@@ -103,8 +111,8 @@ camfarm also needs a Vulkan driver (NVIDIA drivers and JetPack include one). On 
 
 ```sh
 sudo apt install build-essential pkg-config libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-    libgstreamer-plugins-bad1.0-dev libgstrtspserver-1.0-dev
-cargo build --release
+    libgstrtspserver-1.0-dev
+cargo build --release   # target/release/camfarm and target/release/camcheck
 ```
 
 ## camfarm
@@ -117,23 +125,26 @@ camfarm --cameras 32 --width 1280 --height 720 --fps 15 --codec h264 --bitrate-k
 
 | option | meaning |
 |---|---|
-| `--cameras N`, `--first-id K` | camera count and the id of the first one (use different ranges on several machines) |
+| `--cameras N`, `--first-id K` | camera count and the id of the first one; ids go up to 255 (use different ranges on several machines) |
 | `--width`, `--height`, `--fps` | picture size and frame rate |
 | `--codec h264\|h265\|mjpeg` | camera codec |
 | `--bitrate-kbps`, `--vbr`, `--gop-s` | rate control (CBR by default) and key-frame interval |
 | `--jpeg-quality` | MJPEG quality |
 | `--noise` | white noise amplitude in luma levels; raise it for high bitrates |
-| `--phase spread\|random\|aligned` | when each camera captures within the frame period |
+| `--phase spread\|random\|aligned`, `--seed` | when each camera captures within the frame period; the seed sets the random phases and the picture content |
 | `--encoder auto\|jetson\|nvcodec\|software` | encoder elements (auto picks Jetson, then NVIDIA desktop, then software) |
 | `--onvif` | add the ONVIF replay RTP header extension (NTP capture time per frame), like Axis `onvifreplayext=1` |
 | `--port`, `--mount-prefix` | RTSP port (8554) and mount names (`cam`) |
+| `--mtu` | largest RTP packet in bytes (1400) |
+| `--stats-s` | seconds between stats lines (10) |
 
 Frame n of a camera is handed to its encoder at exactly `t0 + phase + n / fps`; that instant is the capture time in
 the code. Every camera has its own RTSP media and UDP sockets. Pictures are rendered on the GPU 200 ms ahead and
 handed to the encoders without a CPU copy (MJPEG cameras render I420, which the JPEG encoders take directly); one
 thread pushes every frame at its due time, 99.9 % of them within 25 µs. Run camfarm as root, or give it
 `CAP_SYS_NICE` (`sudo setcap cap_sys_nice+ep camfarm`), and that thread runs at real-time priority, which also
-trims the rare late wake-ups (worst case 0.9 ms down to 0.13 ms with 160 cameras on a Jetson AGX Orin).
+trims the rare late wake-ups (worst case 0.9 ms down to 0.13 ms with 160 cameras on a Jetson AGX Orin). camfarm
+prints which priority it got.
 
 Capacity notes:
 
@@ -168,8 +179,18 @@ camcheck cuda-ipc --path-base /tmp/cam --count 32 --seconds 60 --csv frames.csv 
 camcheck grid --file recording.h265 --count 32 --cols 8 --cell-w 960 --cell-h 540
 ```
 
+| option | meaning |
+|---|---|
+| `--first`, `--count` | id of the first camera (1) and camera count (32) |
+| `--seconds`, `--warmup` | measurement time (30 s) after a warm-up that is not counted (3 s); grid mode reads the whole file and only skips the warm-up |
+| `--csv`, `--json` | write one row per picture, or the per-camera summary |
+| `--tcp` (rtsp) | RTSP over TCP instead of UDP |
+| `--cols`, `--cell-w`, `--cell-h`, `--fps` (grid) | grid layout (camera k in row k / cols, column k % cols) and the recording's frame rate |
+
 Output, per camera and in total: received fps, distinct camera frames, lost (gaps in the frame numbers), repeated,
 backwards (an older picture after a newer one), unreadable, wrong camera, delivered %, and latency median / p95.
+GStreamer errors, such as a camera that refuses the connection or a missing decoder, are printed as they happen. A
+camera without a single readable picture shows 0.00 % and makes the worst camera 0.00 %.
 Latency is arrival minus the capture time in the code, so the camera machine and the checking machine need
 synchronized clocks (NTP or PTP); with chrony on a LAN expect well under a millisecond of error.
 
@@ -180,11 +201,11 @@ one CUDA context.
 ## Testing a pipeline end to end
 
 1. **Start the cameras** on the camera machine: `camfarm --cameras 32 ...` (see above). It prints one URL per camera
-   and, every few seconds, how many frames it pushed late or skipped. Both counts should stay at 0.
+   and, every 10 s, how many frames it pushed late or skipped. Both counts should stay at 0.
 2. **Check the cameras on their own.** From a machine on the same switch as the camera machine, run
-   `camcheck rtsp --url-base rtsp://<camera host>:8554/cam --count 32 --seconds 60`. Expect 100.000 % delivered and
-   nothing lost. If this check fails, fix the cameras or the network first; nothing downstream can be judged until it
-   passes.
+   `camcheck rtsp --url-base rtsp://<camera host>:8554/cam --count 32 --seconds 60`. Expect 100.000 % delivered,
+   worst camera 100.00 % and nothing lost. If this check fails, fix the cameras or the network first; nothing
+   downstream can be judged until it passes.
 3. **Point the pipeline under test at the cameras**, at `rtsp://<camera host>:8554/cam01` and so on.
 4. **Check what the pipeline delivers**, at the far end:
    - Use `camcheck cuda-ipc` when the pipeline hands out GStreamer CUDA IPC textures.
@@ -210,8 +231,9 @@ What the columns mean:
 - `lat`: arrival time minus capture time.
 
 Frames lost in step 4 but not in step 2 were lost in the pipeline, or in the network between the camera machine and
-the pipeline. `--csv` writes one row per picture (camera, arrival time, frame number, capture time, read error) for
-your own analysis, and `--json` writes the summary.
+the pipeline. `--csv` writes one row per picture for your own analysis: camera slot, arrival time (Unix
+microseconds), camera id and frame number from the code, capture time as carried (low 48 bits of Unix microseconds)
+and the read error. `--json` writes the summary.
 
 ## Testing advice
 
