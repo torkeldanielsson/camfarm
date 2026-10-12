@@ -6,6 +6,10 @@ use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
 use std::sync::{Arc, Mutex};
 
+// both as in picture.wgsl: 64 threads per workgroup, and the smooth field is a quarter of the picture size
+const WORKGROUP_WIDTH: u32 = 64;
+const FIELD_SCALE: u32 = 4;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct Params {
@@ -67,9 +71,9 @@ pub struct Generator {
     pipeline: wgpu::ComputePipeline,
     field: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
-    pub width: u32,
-    pub height: u32,
-    pub frame_bytes: u64,
+    width: u32,
+    height: u32,
+    frame_bytes: u64,
     pub adapter_name: String,
     scratch: Vec<Scratch>,
     free: Vec<wgpu::Buffer>,
@@ -146,7 +150,7 @@ impl Generator {
             layout,
             width,
             height,
-            frame_bytes: (width * height * 3 / 2) as u64,
+            frame_bytes: width as u64 * height as u64 * 3 / 2,
             adapter_name,
             scratch: Vec::new(),
             free: Vec::new(),
@@ -182,7 +186,7 @@ impl Generator {
         });
         let low = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: ((self.width / 4) * (self.height / 4) * 4) as u64,
+            size: (self.width / FIELD_SCALE) as u64 * (self.height / FIELD_SCALE) as u64 * 4,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
@@ -229,12 +233,17 @@ impl Generator {
             pass.set_pipeline(&self.field);
             for scratch in &self.scratch[..jobs.len()] {
                 pass.set_bind_group(0, &scratch.bind, &[]);
-                pass.dispatch_workgroups((self.width / 4).div_ceil(64), self.height / 4, 1);
+                pass.dispatch_workgroups(
+                    (self.width / FIELD_SCALE).div_ceil(WORKGROUP_WIDTH),
+                    self.height / FIELD_SCALE,
+                    1,
+                );
             }
             pass.set_pipeline(&self.pipeline);
+            let words_per_row = self.width / 4;
             for scratch in &self.scratch[..jobs.len()] {
                 pass.set_bind_group(0, &scratch.bind, &[]);
-                pass.dispatch_workgroups((self.width / 4).div_ceil(64), self.height + self.height / 2, 1);
+                pass.dispatch_workgroups(words_per_row.div_ceil(WORKGROUP_WIDTH), self.height * 3 / 2, 1);
             }
         }
         for (scratch, buffer) in self.scratch.iter().zip(&staging) {
