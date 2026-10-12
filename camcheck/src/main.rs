@@ -22,7 +22,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
-#[command(name = "camcheck", version, about = "Check camfarm frame codes from RTSP, GStreamer CUDA IPC exports or a recorded grid")]
+#[command(
+    name = "camcheck",
+    version,
+    about = "Check camfarm frame codes from RTSP, GStreamer CUDA IPC exports or a recorded grid"
+)]
 struct Args {
     #[command(subcommand)]
     mode: Mode,
@@ -133,7 +137,8 @@ mod cuda {
     fn api() -> Result<&'static Api, String> {
         static API: OnceLock<Result<Api, String>> = OnceLock::new();
         API.get_or_init(|| unsafe {
-            let gstcuda = libloading::Library::new("libgstcuda-1.0.so.0").map_err(|e| format!("libgstcuda-1.0: {e}"))?;
+            let gstcuda =
+                libloading::Library::new("libgstcuda-1.0.so.0").map_err(|e| format!("libgstcuda-1.0: {e}"))?;
             let cuda = libloading::Library::new("libcuda.so.1").map_err(|e| format!("libcuda: {e}"))?;
             let api = Api {
                 is_cuda_memory: *gstcuda.get(b"gst_is_cuda_memory\0").map_err(|e| e.to_string())?,
@@ -149,7 +154,13 @@ mod cuda {
     }
 
     /// Copy `rows` rows (`width` bytes each) of plane 0 of a CUDA memory buffer to host memory.
-    pub fn copy_band(buffer: &gst::BufferRef, offset: usize, stride: usize, width: usize, rows: usize) -> Result<Vec<u8>, String> {
+    pub fn copy_band(
+        buffer: &gst::BufferRef,
+        offset: usize,
+        stride: usize,
+        width: usize,
+        rows: usize,
+    ) -> Result<Vec<u8>, String> {
         let api = api()?;
         unsafe {
             let mem = gst::ffi::gst_buffer_peek_memory(buffer.as_mut_ptr(), 0);
@@ -158,7 +169,9 @@ mod cuda {
             }
             let ctx = (*(mem as *mut CudaMemoryHead)).context;
             let mut info = std::mem::MaybeUninit::<gst::ffi::GstMapInfo>::zeroed();
-            if gst::ffi::gst_buffer_map(buffer.as_mut_ptr(), info.as_mut_ptr(), gst::ffi::GST_MAP_READ | GST_MAP_CUDA) == 0 {
+            if gst::ffi::gst_buffer_map(buffer.as_mut_ptr(), info.as_mut_ptr(), gst::ffi::GST_MAP_READ | GST_MAP_CUDA)
+                == 0
+            {
                 return Err("CUDA map failed".into());
             }
             let mut info = info.assume_init();
@@ -385,7 +398,8 @@ fn report(args: &Args, cams: &[u32], recs: &Arc<Vec<Mutex<Vec<Rec>>>>, t_from: u
         }
         std::fs::write(path, out)?;
     }
-    let sums: Vec<Summary> = cams.iter().enumerate().map(|(k, &cam)| summarize(cam, &recs[k].lock().unwrap(), t_from, t_to)).collect();
+    let sums: Vec<Summary> =
+        cams.iter().enumerate().map(|(k, &cam)| summarize(cam, &recs[k].lock().unwrap(), t_from, t_to)).collect();
     println!(
         "{:>4} {:>7} {:>8} {:>6} {:>5} {:>6} {:>6} {:>6} {:>7} {:>9} {:>9}",
         "cam", "fps", "distinct", "lost", "rep", "back", "unread", "wrong", "deliv%", "lat med", "lat p95"
@@ -407,7 +421,8 @@ fn report(args: &Args, cams: &[u32], recs: &Arc<Vec<Mutex<Vec<Rec>>>>, t_from: u
     }
     let mut all_lat: Vec<f64> = sums.iter().flat_map(|s| s.lat_ms.iter().copied()).collect();
     all_lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let (distinct, span, lost) = sums.iter().fold((0usize, 0u64, 0u64), |a, s| (a.0 + s.distinct, a.1 + s.span, a.2 + s.lost));
+    let (distinct, span, lost) =
+        sums.iter().fold((0usize, 0u64, 0u64), |a, s| (a.0 + s.distinct, a.1 + s.span, a.2 + s.lost));
     let total = |f: fn(&Summary) -> usize| sums.iter().map(f).sum::<usize>();
     let latency = if file_mode {
         String::new()

@@ -81,7 +81,7 @@ pub struct Generator {
 
 impl Generator {
     pub fn new(width: u32, height: u32) -> Result<Self> {
-        if width % 4 != 0 || height % 2 != 0 {
+        if !width.is_multiple_of(4) || !height.is_multiple_of(2) {
             return Err(anyhow!("width must be a multiple of 4 and height even"));
         }
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
@@ -256,8 +256,7 @@ impl Generator {
         let Some(batch) = self.in_flight.take() else { return Ok(Vec::new()) };
         {
             zone!("gpu wait");
-            self.device
-                .poll(wgpu::PollType::Wait { submission_index: Some(batch.submission), timeout: None })?;
+            self.device.poll(wgpu::PollType::Wait { submission_index: Some(batch.submission), timeout: None })?;
         }
         batch
             .staging

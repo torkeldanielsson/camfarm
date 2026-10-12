@@ -303,7 +303,8 @@ fn main() -> Result<()> {
         });
         mounts.add_factory(&format!("/{}{:02}", a.mount_prefix, c.id), factory);
     }
-    let _server_id = server.attach(None).map_err(|e| anyhow!("cannot listen on RTSP port {} (in use?): {e}", a.port))?;
+    let _server_id =
+        server.attach(None).map_err(|e| anyhow!("cannot listen on RTSP port {} (in use?): {e}", a.port))?;
 
     // Allocate every GPU buffer and run one batch before the time base is set, so the first frames are on time.
     let per_tick = (n as u64 * a.fps as u64 * TICK.as_millis() as u64).div_ceil(1000) as usize;

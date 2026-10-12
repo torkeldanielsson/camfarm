@@ -93,7 +93,10 @@ pub fn bit(words: &[u32; 4], i: usize) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DecodeError {
     /// Black and white reference cells are too close: no code band in this picture.
-    NoContrast { black: f32, white: f32 },
+    NoContrast {
+        black: f32,
+        white: f32,
+    },
     BadSync,
     BadCrc,
 }
