@@ -17,6 +17,10 @@
 pub const COLS: u32 = 40;
 pub const ROWS: u32 = 3;
 pub const BITS: usize = (COLS * ROWS) as usize;
+/// The picture is this many cells high; the band is the top `ROWS` of them.
+const PICTURE_ROWS: u32 = 30;
+/// Minimum difference between the white and black sync cells, in luma levels.
+const MIN_CONTRAST: f32 = 40.0;
 pub const LUMA_BLACK: u8 = 16;
 pub const LUMA_WHITE: u8 = 235;
 const SYNC_HEAD: u8 = 0b1010_1100;
@@ -39,7 +43,7 @@ pub struct Geometry {
 
 impl Geometry {
     pub fn for_picture(width: u32, height: u32) -> Self {
-        Self { cell_w: width / COLS, cell_h: height / 30 }
+        Self { cell_w: width / COLS, cell_h: height / PICTURE_ROWS }
     }
 
     /// Rows of the picture (from the top) that hold the code band.
@@ -119,16 +123,19 @@ pub fn decode(luma: &[u8], stride: usize, width: u32, height: u32) -> Result<Fra
         }
         *m = sum as f32 / ((y1.max(y0 + 1) - y0) * (x1.max(x0 + 1) - x0)) as f32;
     }
-    let sync: Vec<(usize, bool)> = (0..8)
-        .map(|k| (k, (SYNC_HEAD >> (7 - k)) & 1 == 1))
-        .chain((0..8).map(|k| (112 + k, (SYNC_TAIL >> (7 - k)) & 1 == 1)))
-        .collect();
-    let mean_of = |want: bool| {
-        let v: Vec<f32> = sync.iter().filter(|(_, b)| *b == want).map(|(i, _)| means[*i]).collect();
-        v.iter().sum::<f32>() / v.len() as f32
-    };
-    let (black, white) = (mean_of(false), mean_of(true));
-    if white - black < 40.0 {
+    let (mut black, mut white) = (0f32, 0f32);
+    for (first, sync) in [(0, SYNC_HEAD), (BITS - 8, SYNC_TAIL)] {
+        for k in 0..8 {
+            if (sync >> (7 - k)) & 1 == 1 {
+                white += means[first + k];
+            } else {
+                black += means[first + k];
+            }
+        }
+    }
+    let ones = SYNC_HEAD.count_ones() + SYNC_TAIL.count_ones();
+    let (black, white) = (black / (2 * u8::BITS - ones) as f32, white / ones as f32);
+    if white - black < MIN_CONTRAST {
         return Err(DecodeError::NoContrast { black, white });
     }
     let threshold = (black + white) / 2.0;

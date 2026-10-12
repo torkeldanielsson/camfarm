@@ -163,14 +163,15 @@ mod cuda {
         api().map(|_| ())
     }
 
-    /// Copy `rows` rows (`width` bytes each) of plane 0 of a CUDA memory buffer to host memory.
+    /// Copy `rows` rows (`width` bytes each) of plane 0 of a CUDA memory buffer into `out`.
     pub fn copy_band(
         buffer: &gst::BufferRef,
         offset: usize,
         stride: usize,
         width: usize,
         rows: usize,
-    ) -> Result<Vec<u8>, String> {
+        out: &mut Vec<u8>,
+    ) -> Result<(), String> {
         let api = api()?;
         unsafe {
             let mem = gst::ffi::gst_buffer_peek_memory(buffer.as_mut_ptr(), 0);
@@ -185,7 +186,7 @@ mod cuda {
                 return Err("CUDA map failed".into());
             }
             let mut info = info.assume_init();
-            let mut out = vec![0u8; width * rows];
+            out.resize(width * rows, 0);
             let p = Memcpy2D {
                 src_x_in_bytes: 0,
                 src_y: 0,
@@ -213,7 +214,7 @@ mod cuda {
             if r != 0 {
                 return Err(format!("cuMemcpy2D failed: {r}"));
             }
-            Ok(out)
+            Ok(())
         }
     }
 }
@@ -235,7 +236,7 @@ fn pipeline_for(mode: &Mode, cam: u32, k: usize) -> String {
     }
 }
 
-fn decode_sample(sample: &gst::Sample, cuda: bool) -> Result<FrameId, ReadError> {
+fn decode_sample(sample: &gst::Sample, cuda_band: Option<&mut Vec<u8>>) -> Result<FrameId, ReadError> {
     let picture_error = |e: &str| ReadError::Picture(e.into());
     let buffer = sample.buffer().ok_or_else(|| picture_error("no buffer"))?;
     let caps = sample.caps().ok_or_else(|| picture_error("no caps"))?;
@@ -246,9 +247,9 @@ fn decode_sample(sample: &gst::Sample, cuda: bool) -> Result<FrameId, ReadError>
         None => (vinfo.offset()[0], vinfo.stride()[0] as usize),
     };
     let rows = framecode::Geometry::for_picture(w, h).band_rows() as usize;
-    if cuda {
-        let band = cuda::copy_band(buffer, offset, stride, w as usize, rows).map_err(ReadError::Picture)?;
-        return framecode::decode(&band, w as usize, w, h).map_err(ReadError::Code);
+    if let Some(band) = cuda_band {
+        cuda::copy_band(buffer, offset, stride, w as usize, rows, band).map_err(ReadError::Picture)?;
+        return framecode::decode(band, w as usize, w, h).map_err(ReadError::Code);
     }
     let map = buffer.map_readable().map_err(|_| picture_error("cannot map the buffer"))?;
     let band = map.get(offset..offset + stride * rows).ok_or_else(|| picture_error("buffer smaller than its caps"))?;
@@ -438,12 +439,13 @@ fn read_live(args: &Args, cams: &[u32], recs: &Arc<Vec<Mutex<Vec<Rec>>>>) -> Res
         let sink = pipelines.iter().find_map(|p| p.by_name(&format!("sink{k}"))).unwrap();
         let sink = sink.downcast::<gst_app::AppSink>().unwrap();
         let recs = recs.clone();
+        let mut band = Vec::new();
         sink.set_callbacks(
             gst_app::AppSinkCallbacks::builder()
                 .new_sample(move |sink| {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                     let arrival_us = now_us();
-                    let result = decode_sample(&sample, cuda);
+                    let result = decode_sample(&sample, cuda.then_some(&mut band));
                     recs[k].lock().unwrap().push(Rec { arrival_us, result });
                     Ok(gst::FlowSuccess::Ok)
                 })
