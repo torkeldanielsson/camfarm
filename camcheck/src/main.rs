@@ -21,11 +21,13 @@ struct Args {
     /// first camera id
     #[arg(long, global = true, default_value_t = 1)]
     first: u32,
+    /// number of cameras
     #[arg(long, global = true, default_value_t = 32, value_parser = clap::value_parser!(u32).range(1..))]
     count: u32,
-    /// measurement time after the warm-up
+    /// measurement time in seconds after the warm-up (rtsp, cuda-ipc)
     #[arg(long, global = true, default_value_t = 30.0)]
     seconds: f64,
+    /// seconds at the start that are not counted
     #[arg(long, global = true, default_value_t = 3.0)]
     warmup: f64,
     /// write one line per received picture
@@ -43,6 +45,7 @@ enum Mode {
         /// e.g. rtsp://192.0.2.10:8554/cam (camera NN is appended as two digits)
         #[arg(long)]
         url_base: String,
+        /// RTSP over TCP instead of UDP
         #[arg(long)]
         tcp: bool,
     },
@@ -58,12 +61,16 @@ enum Mode {
 
 #[derive(clap::Args)]
 struct Grid {
+    /// the recording
     #[arg(long)]
     file: String,
+    /// cameras per grid row; camera k is in row k / cols, column k % cols
     #[arg(long, default_value_t = 8)]
     cols: u32,
+    /// cell width in pixels
     #[arg(long, default_value_t = 960)]
     cell_w: u32,
+    /// cell height in pixels
     #[arg(long, default_value_t = 540)]
     cell_h: u32,
     /// frame rate of the recording, for the time axis (latency is not meaningful for a file)

@@ -54,21 +54,28 @@ enum Phase {
 #[derive(Parser, Clone, Debug)]
 #[command(name = "camfarm", version, about = "Synthetic RTSP cameras with a frame identity code")]
 struct Args {
+    /// number of cameras
     #[arg(long, default_value_t = 32, value_parser = clap::value_parser!(u32).range(1..))]
     cameras: u32,
-    /// id of the first camera (code + mount name); use different ranges on several hosts
+    /// id of the first camera, in the code and the mount name (ids go up to 255); use different ranges on several hosts
     #[arg(long, default_value_t = 1)]
     first_id: u32,
+    /// picture width in pixels, a multiple of 4
     #[arg(long, default_value_t = 1280)]
     width: u32,
+    /// picture height in pixels, even
     #[arg(long, default_value_t = 720)]
     height: u32,
+    /// frames per second
     #[arg(long, default_value_t = 15, value_parser = clap::value_parser!(u32).range(1..))]
     fps: u32,
+    /// video codec
     #[arg(long, value_enum, default_value_t = Codec::H264)]
     codec: Codec,
+    /// encoder elements; auto picks jetson, then nvcodec (NVIDIA desktop), then software
     #[arg(long, value_enum, default_value_t = Encoder::Auto)]
     encoder: Encoder,
+    /// H.265/H.264 bitrate in kbit/s
     #[arg(long, default_value_t = 2000)]
     bitrate_kbps: u32,
     /// variable instead of constant bitrate
@@ -77,24 +84,31 @@ struct Args {
     /// key frame interval in seconds
     #[arg(long, default_value_t = 2.0)]
     gop_s: f32,
+    /// MJPEG quality, 0 to 100
     #[arg(long, default_value_t = 85, value_parser = clap::value_parser!(u32).range(0..=100))]
     jpeg_quality: u32,
     /// white noise amplitude in luma levels (entropy: more noise = more bits needed)
     #[arg(long, default_value_t = 6.0)]
     noise: f32,
+    /// when each camera captures within the frame period
     #[arg(long, value_enum, default_value_t = Phase::Spread)]
     phase: Phase,
+    /// seed for --phase random and for the picture content
     #[arg(long, default_value_t = 1)]
     seed: u64,
+    /// RTSP port
     #[arg(long, default_value_t = 8554)]
     port: u16,
+    /// mount names are <prefix>NN, e.g. cam01
     #[arg(long, default_value = "cam")]
     mount_prefix: String,
     /// add the ONVIF replay RTP header extension (NTP capture time per frame), like Axis onvifreplayext=1
     #[arg(long)]
     onvif: bool,
+    /// largest RTP packet in bytes
     #[arg(long, default_value_t = 1400)]
     mtu: u32,
+    /// seconds between stats lines
     #[arg(long, default_value_t = 10)]
     stats_s: u64,
 }
@@ -263,20 +277,13 @@ fn main() -> Result<()> {
     let period = Duration::from_nanos(1_000_000_000 / a.fps as u64);
     let cams = Arc::new(cameras(&a, period));
 
+    let rate = match a.codec {
+        Codec::Mjpeg => format!("quality {}", a.jpeg_quality),
+        _ => format!("{} kbit/s {}, GOP {} s", a.bitrate_kbps, if a.vbr { "VBR" } else { "CBR" }, a.gop_s),
+    };
     println!(
-        "camfarm: {} x {}x{}@{} {:?} via {:?}, {} kbit/s {}, GOP {} s, noise {}, phase {:?}, GPU {}",
-        a.cameras,
-        a.width,
-        a.height,
-        a.fps,
-        a.codec,
-        enc,
-        a.bitrate_kbps,
-        if a.vbr { "VBR" } else { "CBR" },
-        a.gop_s,
-        a.noise,
-        a.phase,
-        generator.adapter_name
+        "camfarm: {} x {}x{}@{} {:?} via {:?}, {rate}, noise {}, phase {:?}, GPU {}",
+        a.cameras, a.width, a.height, a.fps, a.codec, enc, a.noise, a.phase, generator.adapter_name
     );
     println!("pipeline: {desc}");
     for c in cams.iter() {
