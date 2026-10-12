@@ -4,7 +4,7 @@
 # Record the source first, e.g. ffmpeg -rtsp_transport tcp -i rtsp://127.0.0.1:8554/cam01 -t 12 -c copy src.mkv
 # Needs ffmpeg with libx264 and libx265. Then: python3 docs/robustness_chart.py
 set -eu
-src=$1
+src=${1:?usage: docs/robustness.sh <recording of one 1280x720 camera> [camcheck binary] > docs/robustness.csv}
 camcheck=${2:-camcheck}
 work=$(mktemp -d)
 trap 'rm -f "$work"/v.* "$work"/r.csv; rmdir "$work"' EXIT
@@ -23,7 +23,7 @@ for size in 1280x720 960x540 640x360 480x270 320x180; do
             ffmpeg -loglevel error -y -i "$src" -vf scale=$w:$h:flags=bicubic $enc -an "$out"
             secs=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$out")
             kbps=$(python3 -c "import os; print(round(os.path.getsize('$out') * 8 / $secs / 1000))")
-            "$camcheck" grid --file "$out" --count 1 --cols 1 --cell-w $w --cell-h $h --warmup 0 --csv "$work/r.csv" > /dev/null 2>&1
+            "$camcheck" grid --file "$out" --count 1 --cols 1 --cell-w $w --cell-h $h --warmup 0 --csv "$work/r.csv" > /dev/null
             python3 -c "
 import csv
 rows = list(csv.DictReader(open('$work/r.csv')))
