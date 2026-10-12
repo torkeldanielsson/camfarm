@@ -7,7 +7,7 @@
 mod gen;
 mod prof;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, ValueEnum};
 use gst::prelude::*;
 use gstreamer as gst;
@@ -53,7 +53,7 @@ enum Phase {
 #[derive(Parser, Debug)]
 #[command(name = "camfarm", version, about = "Synthetic RTSP cameras with a frame identity code")]
 struct Args {
-    #[arg(long, default_value_t = 32)]
+    #[arg(long, default_value_t = 32, value_parser = clap::value_parser!(u32).range(1..))]
     cameras: u32,
     /// id of the first camera (code + mount name); use different ranges on several hosts
     #[arg(long, default_value_t = 1)]
@@ -62,7 +62,7 @@ struct Args {
     width: u32,
     #[arg(long, default_value_t = 720)]
     height: u32,
-    #[arg(long, default_value_t = 15)]
+    #[arg(long, default_value_t = 15, value_parser = clap::value_parser!(u32).range(1..))]
     fps: u32,
     #[arg(long, value_enum, default_value_t = Codec::H264)]
     codec: Codec,
@@ -76,7 +76,7 @@ struct Args {
     /// key frame interval in seconds
     #[arg(long, default_value_t = 2.0)]
     gop_s: f32,
-    #[arg(long, default_value_t = 85)]
+    #[arg(long, default_value_t = 85, value_parser = clap::value_parser!(u32).range(0..=100))]
     jpeg_quality: u32,
     /// white noise amplitude in luma levels (entropy: more noise = more bits needed)
     #[arg(long, default_value_t = 6.0)]
@@ -220,13 +220,18 @@ fn splitmix(mut x: u64) -> u64 {
 
 fn main() -> Result<()> {
     let a = Args::parse();
+    let last_id = a.first_id as u64 + a.cameras as u64 - 1;
+    if last_id > u8::MAX as u64 {
+        bail!("camera ids {}..={last_id} do not fit the frame code, which carries ids up to 255", a.first_id);
+    }
     prof::start();
     gst::init()?;
     let enc = resolve_encoder(&a);
     let desc = pipeline_desc(&a, enc)?;
+    gst::parse::launch(&desc).with_context(|| format!("cannot build the camera pipeline {desc}"))?;
     let mut generator = gen::Generator::new(a.width, a.height)?;
     let period = Duration::from_nanos(1_000_000_000 / a.fps as u64);
-    let n = a.cameras.max(1);
+    let n = a.cameras;
     let cams: Arc<Vec<Camera>> = Arc::new(
         (0..n)
             .map(|k| {
@@ -431,7 +436,11 @@ fn push_loop(cams: &[Camera], ready: &Ready, period: Duration) {
     unsafe {
         libc::prctl(libc::PR_SET_TIMERSLACK, 1);
         let param = libc::sched_param { sched_priority: 10 };
-        libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param);
+        if libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param) == 0 {
+            println!("push thread: real-time priority");
+        } else {
+            println!("push thread: normal priority (real-time needs root or CAP_SYS_NICE)");
+        }
     }
     let mut frames = ready.frames.lock().unwrap();
     loop {

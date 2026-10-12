@@ -3,7 +3,7 @@
 //! GPU, and its pictures are handed out zero-copy: a staging buffer stays mapped until GStreamer drops the picture.
 
 use crate::prof::zone;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
 use std::sync::{Arc, Mutex};
 
@@ -88,9 +88,11 @@ impl Generator {
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
-        }))?;
+        }))
+        .context("no GPU found (camfarm needs a Vulkan driver)")?;
         let adapter_name = format!("{} ({:?})", adapter.get_info().name, adapter.get_info().backend);
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+            .context("cannot open the GPU")?;
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("picture"),
             source: wgpu::ShaderSource::Wgsl(include_str!("picture.wgsl").into()),
