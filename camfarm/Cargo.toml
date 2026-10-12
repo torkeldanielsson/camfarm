@@ -14,11 +14,13 @@ clap = { version = "4", features = ["derive"] }
 gstreamer = { version = "0.25", features = ["v1_20"] }
 gstreamer-app = { version = "0.25", features = ["v1_20"] }
 gstreamer-rtsp-server = { version = "0.25", features = ["v1_20"] }
-libc = "0.2"
 pollster = "1"
 wgpu = "30"
 nvtx = { version = "2", default-features = false, features = ["std"], optional = true }
 tracy-client = { version = "0.19", features = ["ondemand"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 [features]
 tracy = ["dep:tracy-client"]
