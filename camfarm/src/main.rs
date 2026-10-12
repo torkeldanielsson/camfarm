@@ -1,9 +1,3 @@
-//! camfarm: synthetic RTSP cameras. Every camera renders its pictures on the GPU (animated noise field, moving discs,
-//! white noise, and a frame identity code in the top band: camera id, frame number, capture time), hardware-encodes them (Jetson V4L2/NVJPG, desktop
-//! NVENC, or software) and serves them as rtsp://<host>:<port>/<prefix>NN. Frame n of a camera is pushed into
-//! its encoder at exactly t0 + phase + n / fps; its capture time (in the code, and in the ONVIF RTP header
-//! extension with --onvif) is that instant.
-
 mod gen;
 mod prof;
 
@@ -266,7 +260,6 @@ fn main() -> Result<()> {
         );
     }
 
-    // RTSP server: one shared media per camera, its appsrc registered with the camera when configured.
     let server = rtsp::RTSPServer::new();
     server.set_service(&a.port.to_string());
     let mounts = server.mount_points().ok_or_else(|| anyhow!("no mount points"))?;
@@ -324,8 +317,6 @@ fn main() -> Result<()> {
     generator.submit(&vec![params(&cams[0], 0, 0); max_batch]);
     drop(generator.collect()?);
 
-    // Common time base: frame n of camera c is captured at t0 + phase_c + n * period (monotonic), which is
-    // rt0_us + (phase_c + n * period) in Unix microseconds.
     let timeline = Arc::new(Timeline {
         t0: Instant::now() + Duration::from_millis(1500),
         rt0_us: (SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros() + 1_500_000) as u64,
@@ -333,7 +324,6 @@ fn main() -> Result<()> {
     });
     let ready = Arc::new(Ready::default());
 
-    // Render thread: renders every frame due within AHEAD, earliest first, all cameras in one GPU batch per tick.
     {
         let (cams, ready, timeline) = (cams.clone(), ready.clone(), timeline.clone());
         std::thread::Builder::new().name("render".into()).spawn(move || {
@@ -384,13 +374,11 @@ fn main() -> Result<()> {
         })?;
     }
 
-    // Push thread: hands each frame to its camera's encoder at its exact due time.
     {
         let cams = cams.clone();
         std::thread::Builder::new().name("push".into()).spawn(move || push_loop(&cams, &ready, period))?;
     }
 
-    // Stats.
     {
         let cams = cams.clone();
         let every = Duration::from_secs(a.stats_s.max(1));
@@ -415,11 +403,10 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Pushes each rendered frame at its due time. Sleeps with a 1 ns timer slack instead of spinning, at real-time
-/// priority when allowed (root or CAP_SYS_NICE).
 fn push_loop(cams: &[Camera], ready: &Ready, period: Duration) {
     #[cfg(target_os = "linux")]
     unsafe {
+        // a 1 ns timer slack lets this thread sleep until a frame is due instead of spinning
         libc::prctl(libc::PR_SET_TIMERSLACK, 1);
         let param = libc::sched_param { sched_priority: 10 };
         if libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param) == 0 {

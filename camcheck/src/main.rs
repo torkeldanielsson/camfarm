@@ -1,15 +1,3 @@
-//! camcheck: reads camfarm pictures and checks the frame identity code (framecode) in every one of them.
-//!
-//! `rtsp`: pull the cameras directly (reference: proves the cameras and the network are clean).
-//! `cuda-ipc`: read GStreamer CUDA IPC exports (cudaipcsink servers, one socket per camera). Only the code band rows
-//!   are copied out of GPU memory, so the reader hardly loads the machine it runs on.
-//! `grid`: decode a recorded video in which the cameras are tiled in a grid (e.g. a composed stream) and read every
-//!   cell.
-//!
-//! Per camera: frames received, distinct camera frames, lost (gaps in the frame numbers), repeated, frames that went
-//! backwards (an older picture shown after a newer one), unreadable, pictures of the wrong camera, and the latency
-//! from the capture time in the code to the arrival here (sender and receiver clocks must be in sync, e.g. NTP).
-
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use framecode::{DecodeError, FrameId};

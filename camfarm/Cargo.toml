@@ -21,6 +21,5 @@ nvtx = { version = "2", default-features = false, features = ["std"], optional =
 tracy-client = { version = "0.19", features = ["ondemand"], optional = true }
 
 [features]
-# profiler zones: Tracy 0.14 (tprof or the Tracy GUI, port 8086) and NVTX ranges for Nsight Systems
 tracy = ["dep:tracy-client"]
 nvtx = ["dep:nvtx"]

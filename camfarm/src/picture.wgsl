@@ -1,11 +1,6 @@
-// One test camera picture, written as NV12 (Y plane, then interleaved UV) or, with `planar`, as I420 (Y, U and V
-// planes), in packed u32 words.
-//
-// Top tenth: the frame code band (see the framecode crate). Below: an animated value-noise field with domain
-// warping and a few drifting discs (motion for the encoder's inter prediction), plus per-pixel white noise
-// (entropy: more noise needs more bits). The smooth field is rendered at a quarter of the picture size by
-// `field` and sampled bilinearly by `main`.
-//
+// One picture as NV12, or I420 with `planar`, in packed u32 words. Below the frame code band: a smooth field with
+// drifting discs (motion for inter prediction), rendered at quarter size by `field` and sampled by `main`, plus
+// per-pixel white noise, which sets how many bits the encoder needs.
 // Integer hash: "lowbias32" by Chris Wellons (https://nullprogram.com/blog/2018/07/31/), public domain.
 
 struct Params {
@@ -74,7 +69,6 @@ fn field_rgb(uv: vec2<f32>) -> vec3<f32> {
     let warp = vec2<f32>(fbm(q + vec2<f32>(t * 0.7, 0.0), p.seed), fbm(q + vec2<f32>(0.0, t * 0.5) + 9.0, p.seed + 7u));
     let n = fbm(q + 2.5 * warp + vec2<f32>(t * 0.3, -t * 0.2), p.seed + 13u);
     var c = hue_rgb(p.hue + 0.35 * n, 0.75, 0.25 + 0.6 * n);
-    // three drifting discs
     for (var k = 0u; k < 3u; k = k + 1u) {
         let fk = f32(k);
         let centre = vec2<f32>(0.5 + 0.35 * sin(t * (0.9 + 0.3 * fk) + fk * 2.1), 0.55 + 0.3 * cos(t * (0.7 + 0.2 * fk) + fk * 1.3));

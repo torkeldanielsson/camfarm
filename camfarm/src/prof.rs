@@ -1,5 +1,4 @@
-//! Optional profiling: Tracy zones and plots (feature `tracy`) and NVTX ranges for Nsight Systems (feature `nvtx`).
-//! Without the features every macro expands to nothing.
+//! Tracy (feature `tracy`) and NVTX (feature `nvtx`) zones; without the features the macros expand to nothing.
 
 /// Profile the rest of the enclosing block as a named zone.
 macro_rules! zone {
@@ -17,7 +16,6 @@ macro_rules! zone {
     };
 }
 
-/// Record a value on a Tracy plot.
 macro_rules! plot {
     ($name:literal, $value:expr) => {
         #[cfg(feature = "tracy")]
