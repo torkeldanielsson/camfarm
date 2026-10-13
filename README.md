@@ -170,18 +170,18 @@ The zones cover the render thread (`render loop`, `gpu submit`, `gpu wait`) and 
 
 ```sh
 # Verify the cameras themselves (run it on a machine on the same switch as the cameras)
-camcheck rtsp --url-base rtsp://192.0.2.10:8554/cam --count 32 --seconds 60
+camcheck rtsp --url-base rtsp://192.0.2.10:8554/cam --cameras 32 --seconds 60
 
 # Check what a pipeline hands out as GStreamer CUDA IPC exports (cudaipcsink sockets /tmp/cam01 ... /tmp/cam32)
-camcheck cuda-ipc --path-base /tmp/cam --count 32 --seconds 60 --csv frames.csv --json summary.json
+camcheck cuda-ipc --path-base /tmp/cam --cameras 32 --seconds 60 --csv frames.csv --json summary.json
 
 # Check a recorded composed stream with the cameras in an 8-column grid of 960x540 cells
-camcheck grid --file recording.h265 --count 32 --cols 8 --cell-w 960 --cell-h 540
+camcheck grid --file recording.h265 --cameras 32 --cols 8 --cell-w 960 --cell-h 540
 ```
 
 | option | meaning |
 |---|---|
-| `--first`, `--count` | id of the first camera (1) and camera count (32) |
+| `--first-id`, `--cameras` | id of the first camera (1) and camera count (32), as in camfarm (`--first` and `--count` also work) |
 | `--seconds`, `--warmup` | measurement time (30 s) after a warm-up that is not counted (3 s); grid mode reads the whole file and only skips the warm-up |
 | `--csv`, `--json` | write one row per picture, or the per-camera summary |
 | `--tcp` (rtsp) | RTSP over TCP instead of UDP |
@@ -203,7 +203,7 @@ one CUDA context.
 1. **Start the cameras** on the camera machine: `camfarm --cameras 32 ...` (see above). It prints one URL per camera
    and, every 10 s, how many frames it pushed late or skipped. Both counts should stay at 0.
 2. **Check the cameras on their own.** From a machine on the same switch as the camera machine, run
-   `camcheck rtsp --url-base rtsp://<camera host>:8554/cam --count 32 --seconds 60`. Expect 100.000 % delivered,
+   `camcheck rtsp --url-base rtsp://<camera host>:8554/cam --cameras 32 --seconds 60`. Expect 100.000 % delivered,
    worst camera 100.00 % and nothing lost. If this check fails, fix the cameras or the network first; nothing
    downstream can be judged until it passes.
 3. **Point the pipeline under test at the cameras**, at `rtsp://<camera host>:8554/cam01` and so on.

@@ -18,11 +18,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 struct Args {
     #[command(subcommand)]
     mode: Mode,
-    /// first camera id
-    #[arg(long, global = true, default_value_t = 1)]
+    /// id of the first camera
+    #[arg(long = "first-id", visible_alias = "first", value_name = "FIRST_ID", global = true, default_value_t = 1)]
     first: u32,
     /// number of cameras
-    #[arg(long, global = true, default_value_t = 32, value_parser = clap::value_parser!(u32).range(1..))]
+    #[arg(
+        long = "cameras",
+        visible_alias = "count",
+        value_name = "CAMERAS",
+        global = true,
+        default_value_t = 32,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
     count: u32,
     /// measurement time in seconds after the warm-up (rtsp, cuda-ipc)
     #[arg(long, global = true, default_value_t = 30.0)]
