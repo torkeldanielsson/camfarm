@@ -5,9 +5,13 @@ use gst::prelude::*;
 use gstreamer as gst;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Reading goes on this long after the window, so frames captured near its end still count when they arrive late.
+const READ_TAIL: Duration = Duration::from_secs(1);
 
 #[derive(Parser)]
 #[command(
@@ -298,29 +302,57 @@ struct Summary {
     unreadable: usize,
     wrong_camera: usize,
     distinct: usize,
-    span: u64,
+    expected: u64,
     lost: u64,
     repeated: usize,
     backwards: usize,
     lat_ms: Vec<f64>,
     fps: f64,
+    /// Every frame of this camera read during the whole run: frame number to (capture, first arrival), Unix us.
+    frames: BTreeMap<u32, (u64, u64)>,
 }
 
 impl Summary {
+    fn delivered(&self) -> u64 {
+        self.expected - self.lost
+    }
+
     fn delivered_pct(&self) -> f64 {
-        if self.span > 0 {
-            100.0 * self.distinct as f64 / self.span as f64
+        if self.expected > 0 {
+            100.0 * self.delivered() as f64 / self.expected as f64
         } else {
             0.0
         }
+    }
+
+    fn period_us(&self) -> Option<f64> {
+        let ((&n0, &(c0, _)), (&n1, &(c1, _))) = (self.frames.first_key_value()?, self.frames.last_key_value()?);
+        (n1 > n0).then(|| (c1 as f64 - c0 as f64) / (n1 - n0) as f64)
+    }
+
+    /// Smallest and largest latency (us) of the frames that arrived in the window, or of all frames if none did.
+    fn latency_range_us(&self, t_from: u64, t_to: u64) -> Option<(f64, f64)> {
+        let latency = |&(capture, arrival): &(u64, u64)| arrival as f64 - capture as f64;
+        let in_window = self.frames.values().filter(|(_, arrival)| (t_from..t_to).contains(arrival));
+        let lats: Vec<f64> = in_window.map(latency).collect();
+        let lats = if lats.is_empty() { self.frames.values().map(latency).collect() } else { lats };
+        let lo = lats.iter().copied().reduce(f64::min)?;
+        Some((lo, lats.iter().copied().fold(lo, f64::max)))
     }
 }
 
 fn summarize(cam: u32, recs: &[Rec], t_from: u64, t_to: u64) -> Summary {
     let mut s = Summary { cam, ..Default::default() };
-    let mut seen = std::collections::BTreeMap::new();
+    let mut seen = BTreeMap::new();
     let mut prev: Option<u32> = None;
     let mut max_frame: Option<u32> = None;
+    for r in recs {
+        let Ok(id) = r.result else { continue };
+        if id.camera as u32 == cam {
+            let capture = framecode::unwrap_capture_us(id.capture_us, r.arrival_us);
+            s.frames.entry(id.frame).or_insert((capture, r.arrival_us));
+        }
+    }
     for r in recs.iter().filter(|r| r.arrival_us >= t_from && r.arrival_us < t_to) {
         s.samples += 1;
         let id = match r.result {
@@ -349,15 +381,35 @@ fn summarize(cam: u32, recs: &[Rec], t_from: u64, t_to: u64) -> Summary {
             (r.arrival_us as f64 - capture as f64) / 1000.0
         });
     }
-    if let (Some((&first, _)), Some((&last, _))) = (seen.iter().next(), seen.iter().next_back()) {
-        s.distinct = seen.len();
-        s.span = (last - first) as u64 + 1;
-        s.lost = s.span - s.distinct as u64;
-    }
+    s.distinct = seen.len();
     s.lat_ms = seen.values().copied().collect();
     s.lat_ms.sort_by(f64::total_cmp);
     s.fps = s.samples as f64 / ((t_to - t_from) as f64 / 1e6);
     s
+}
+
+/// Expected frames: those a camera captured while the window, shifted back by its latency and shortened by its latency
+/// spread, was open. A frame counts as delivered if it arrived at any time during the run.
+fn count_expected(sums: &mut [Summary], t_from: u64, t_to: u64) {
+    let mut periods: Vec<f64> = sums.iter().filter_map(Summary::period_us).collect();
+    periods.sort_by(f64::total_cmp);
+    let typical_period = periods.get(periods.len() / 2).copied();
+    for s in sums.iter_mut() {
+        let Some(period) = s.period_us().or(typical_period) else { continue };
+        let (Some((&n_ref, &(c_ref, _))), Some((lat_lo, lat_hi))) =
+            (s.frames.first_key_value(), s.latency_range_us(t_from, t_to))
+        else {
+            s.expected = ((t_to - t_from) as f64 / period).round() as u64;
+            s.lost = s.expected;
+            continue;
+        };
+        let frame_at = |t: f64| n_ref as f64 + ((t - c_ref as f64) / period).ceil();
+        let first = frame_at(t_from as f64 - lat_lo).max(0.0);
+        let end = frame_at(t_to as f64 - lat_hi).clamp(first, u32::MAX as f64);
+        let (first, end) = (first as u32, end as u32);
+        s.expected = (end - first) as u64;
+        s.lost = s.expected - s.frames.range(first..end).count() as u64;
+    }
 }
 
 fn pct(v: &[f64], p: f64) -> f64 {
@@ -485,7 +537,7 @@ fn read_live(args: &Args, cams: &[u32], recs: &Arc<Vec<Mutex<Vec<Rec>>>>) -> Res
         }
     }
     let t_from = now_us() + (args.warmup * 1e6) as u64;
-    std::thread::sleep(Duration::from_secs_f64(args.warmup + args.seconds + 0.2));
+    std::thread::sleep(Duration::from_secs_f64(args.warmup + args.seconds) + READ_TAIL);
     for pipeline in &pipelines {
         let _ = pipeline.set_state(gst::State::Null);
     }
@@ -508,11 +560,15 @@ fn report(args: &Args, cams: &[u32], recs: &[Mutex<Vec<Rec>>], t_from: u64, t_to
         }
         std::fs::write(path, out).with_context(|| format!("cannot write {path}"))?;
     }
-    let sums: Vec<Summary> =
+    let mut sums: Vec<Summary> =
         cams.iter().enumerate().map(|(k, &cam)| summarize(cam, &recs[k].lock().unwrap(), t_from, t_to)).collect();
+    let last_picture = recs.iter().filter_map(|r| r.lock().unwrap().last().map(|r| r.arrival_us)).max();
+    // a recording has no picture after its last one, so frames due after it cannot be expected
+    let expect_to = if file_mode { t_to.min(last_picture.unwrap_or(t_from) + 1) } else { t_to };
+    count_expected(&mut sums, t_from, expect_to);
     println!(
         "{:>4} {:>7} {:>8} {:>6} {:>5} {:>6} {:>6} {:>6} {:>7} {:>9} {:>9}",
-        "cam", "fps", "distinct", "lost", "rep", "back", "unread", "wrong", "deliv%", "lat med", "lat p95"
+        "cam", "fps", "expected", "lost", "rep", "back", "unread", "wrong", "deliv%", "lat med", "lat p95"
     );
     let mut json = Vec::with_capacity(sums.len());
     for s in &sums {
@@ -520,19 +576,31 @@ fn report(args: &Args, cams: &[u32], recs: &[Mutex<Vec<Rec>>], t_from: u64, t_to
         let (lm, lp) = if file_mode { (f64::NAN, f64::NAN) } else { (pct(&s.lat_ms, 0.5), pct(&s.lat_ms, 0.95)) };
         println!(
             "{:>4} {:>7.2} {:>8} {:>6} {:>5} {:>6} {:>6} {:>6} {:>7.2} {:>9.1} {:>9.1}",
-            s.cam, s.fps, s.distinct, s.lost, s.repeated, s.backwards, s.unreadable, s.wrong_camera, deliv, lm, lp
+            s.cam, s.fps, s.expected, s.lost, s.repeated, s.backwards, s.unreadable, s.wrong_camera, deliv, lm, lp
         );
         json.push(format!(
-            "  {{\"camera\": {}, \"fps\": {:.3}, \"samples\": {}, \"distinct\": {}, \"span\": {}, \"lost\": {}, \"repeated\": {}, \
-             \"backwards\": {}, \"unreadable\": {}, \"wrong_camera\": {}, \"delivered_pct\": {:.3}, \"lat_median_ms\": {}, \"lat_p95_ms\": {}}}",
-            s.cam, s.fps, s.samples, s.distinct, s.span, s.lost, s.repeated, s.backwards, s.unreadable, s.wrong_camera, deliv,
-            json_ms(lm), json_ms(lp)
+            "  {{\"camera\": {}, \"fps\": {:.3}, \"samples\": {}, \"distinct\": {}, \"expected\": {}, \"delivered\": {}, \
+             \"lost\": {}, \"repeated\": {}, \"backwards\": {}, \"unreadable\": {}, \"wrong_camera\": {}, \"delivered_pct\": {:.3}, \
+             \"lat_median_ms\": {}, \"lat_p95_ms\": {}}}",
+            s.cam,
+            s.fps,
+            s.samples,
+            s.distinct,
+            s.expected,
+            s.delivered(),
+            s.lost,
+            s.repeated,
+            s.backwards,
+            s.unreadable,
+            s.wrong_camera,
+            deliv,
+            json_ms(lm),
+            json_ms(lp)
         ));
     }
     let mut all_lat: Vec<f64> = sums.iter().flat_map(|s| s.lat_ms.iter().copied()).collect();
     all_lat.sort_by(f64::total_cmp);
-    let (distinct, span, lost) =
-        sums.iter().fold((0usize, 0u64, 0u64), |a, s| (a.0 + s.distinct, a.1 + s.span, a.2 + s.lost));
+    let (expected, lost) = sums.iter().fold((0, 0), |a, s| (a.0 + s.expected, a.1 + s.lost));
     let total = |f: fn(&Summary) -> usize| sums.iter().map(f).sum::<usize>();
     let latency = if file_mode {
         String::new()
@@ -540,10 +608,11 @@ fn report(args: &Args, cams: &[u32], recs: &[Mutex<Vec<Rec>>], t_from: u64, t_to
         format!(", latency median {:.1} ms p95 {:.1} ms", pct(&all_lat, 0.5), pct(&all_lat, 0.95))
     };
     println!(
-        "ALL: {} cameras, distinct {distinct} of {span} camera frames ({:.3} %), lost {lost}, repeated {}, backwards {}, \
-         unreadable {}, wrong camera {}{latency}, worst camera {:.2} %",
+        "ALL: {} cameras, delivered {} of {expected} expected camera frames ({:.3} %), lost {lost}, repeated {}, \
+         backwards {}, unreadable {}, wrong camera {}{latency}, worst camera {:.2} %",
         sums.len(),
-        if span > 0 { 100.0 * distinct as f64 / span as f64 } else { 0.0 },
+        expected - lost,
+        if expected > 0 { 100.0 * (expected - lost) as f64 / expected as f64 } else { 0.0 },
         total(|s| s.repeated),
         total(|s| s.backwards),
         total(|s| s.unreadable),
@@ -562,5 +631,52 @@ fn json_ms(v: f64) -> String {
         format!("{v:.2}")
     } else {
         "null".into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const T0: u64 = 1_791_550_000_000_000;
+    const PERIOD: u64 = 66_667;
+
+    fn recs(cam: u8, frames: std::ops::Range<u32>, latency: impl Fn(u32) -> u64) -> Vec<Rec> {
+        frames
+            .map(|n| {
+                let capture = T0 + n as u64 * PERIOD;
+                let id = FrameId { camera: cam, frame: n, capture_us: capture & ((1 << 48) - 1) };
+                Rec { arrival_us: capture + latency(n), result: Ok(id) }
+            })
+            .collect()
+    }
+
+    fn summaries(per_camera: &[Vec<Rec>]) -> Vec<Summary> {
+        let (t_from, t_to) = (T0 + 3_000_000, T0 + 13_000_000);
+        let mut sums: Vec<Summary> =
+            per_camera.iter().enumerate().map(|(k, r)| summarize(k as u32 + 1, r, t_from, t_to)).collect();
+        count_expected(&mut sums, t_from, t_to);
+        sums
+    }
+
+    #[test]
+    fn jitter_at_the_window_edges_is_not_loss() {
+        let s = &summaries(&[recs(1, 0..300, |n| 20_000 + (n as u64 * 7919) % 5_000)])[0];
+        assert_eq!(s.lost, 0);
+        assert!((149..=151).contains(&s.expected), "expected {}", s.expected);
+    }
+
+    #[test]
+    fn a_camera_that_stops_loses_the_rest_of_the_window() {
+        let sums = summaries(&[recs(1, 0..300, |_| 20_000), recs(2, 0..120, |_| 20_000)]);
+        assert_eq!(sums[0].lost, 0);
+        assert!((70..=80).contains(&sums[1].lost), "lost {}", sums[1].lost);
+    }
+
+    #[test]
+    fn a_camera_without_frames_expects_window_times_fps() {
+        let sums = summaries(&[recs(1, 0..300, |_| 20_000), Vec::new()]);
+        assert_eq!((sums[1].expected, sums[1].lost), (150, 150));
+        assert_eq!(sums[1].delivered_pct(), 0.0);
     }
 }

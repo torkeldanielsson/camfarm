@@ -187,8 +187,8 @@ camcheck grid --file recording.h265 --cameras 32 --cols 8 --cell-w 960 --cell-h 
 | `--tcp` (rtsp) | RTSP over TCP instead of UDP |
 | `--cols`, `--cell-w`, `--cell-h`, `--fps` (grid) | grid layout (camera k in row k / cols, column k % cols) and the recording's frame rate |
 
-Output, per camera and in total: received fps, distinct camera frames, lost (gaps in the frame numbers), repeated,
-backwards (an older picture after a newer one), unreadable, wrong camera, delivered %, and latency median / p95.
+Output, per camera and in total: received fps, expected frames, lost, repeated, backwards (an older picture after a
+newer one), unreadable, wrong camera, delivered %, and latency median / p95 (see the column list below).
 GStreamer errors, such as a camera that refuses the connection or a missing decoder, are printed as they happen. A
 camera without a single readable picture shows 0.00 % and makes the worst camera 0.00 %.
 Latency is arrival minus the capture time in the code, so the camera machine and the checking machine need
@@ -214,16 +214,24 @@ one CUDA context.
 5. **Read the result.** A clean run looks like this:
 
 ```text
- cam     fps distinct   lost   rep   back unread  wrong  deliv%   lat med   lat p95
+ cam     fps expected   lost   rep   back unread  wrong  deliv%   lat med   lat p95
    1   15.00      300      0     0      0      0      0  100.00      22.9      23.4
    2   15.00      300      0     0      0      0      0  100.00      22.9      23.3
    ...
-ALL: 4 cameras, distinct 1200 of 1200 camera frames (100.000 %), lost 0, repeated 0, backwards 0, unreadable 0, wrong camera 0, latency median 22.9 ms p95 23.3 ms, worst camera 100.00 %
+ALL: 4 cameras, delivered 1200 of 1200 expected camera frames (100.000 %), lost 0, repeated 0, backwards 0, unreadable 0, wrong camera 0, latency median 22.9 ms p95 23.3 ms, worst camera 100.00 %
 ```
 
 What the columns mean:
 
-- `lost`: frame numbers that never arrived.
+- `expected`: the frames the camera captured during the measurement window, about window length x frame rate.
+  camcheck takes the frame rate from the capture times in the code, shifts the window back by the camera's latency,
+  and shortens it by the camera's latency spread (largest minus smallest latency in the window), so jitter at the
+  window edges never counts as loss. A camera without a single readable picture expects window length x the other
+  cameras' frame rate.
+- `lost`: expected frames that never arrived, at any time during the run. A camera that stops halfway loses the rest
+  of the window; one that delivers nothing loses all of it.
+- `deliv%`: (expected - lost) / expected. The ALL line adds up expected and lost over all cameras, and the worst
+  camera is the lowest `deliv%`.
 - `rep`: the same frame handed out again, as happens when a pipeline holds the last picture.
 - `back`: an older frame arriving after a newer one.
 - `unread`: pictures whose code could not be read.
