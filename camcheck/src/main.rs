@@ -555,10 +555,14 @@ fn report(args: &Args, cams: &[u32], recs: &[Mutex<Vec<Rec>>], t_from: u64, t_to
     let file_mode = matches!(args.mode, Mode::Grid(_));
     if let Some(path) = &args.csv {
         let mut out = String::from("camera,arrival_us,frame_camera,frame,capture_us,error\n");
+        let clock_us = now_us();
         for (k, &cam) in cams.iter().enumerate() {
             for r in recs[k].lock().unwrap().iter() {
                 match r.result {
-                    Ok(id) => writeln!(out, "{cam},{},{},{},{},", r.arrival_us, id.camera, id.frame, id.capture_us)?,
+                    Ok(id) => {
+                        let capture_us = framecode::unwrap_capture_us(id.capture_us, clock_us);
+                        writeln!(out, "{cam},{},{},{},{capture_us},", r.arrival_us, id.camera, id.frame)?
+                    }
                     Err(ref e) => {
                         writeln!(out, "{cam},{},,,,\"{}\"", r.arrival_us, e.to_string().replace('"', "\"\""))?
                     }

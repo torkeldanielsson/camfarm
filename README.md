@@ -243,9 +243,10 @@ What the columns mean:
 - `lat`: arrival time minus capture time.
 
 Frames lost in step 4 but not in step 2 were lost in the pipeline, or in the network between the camera machine and
-the pipeline. `--csv` writes one row per picture for your own analysis: camera slot, arrival time (Unix
-microseconds), camera id and frame number from the code, capture time as carried (low 48 bits of Unix microseconds)
-and the read error. `--json` writes the summary.
+the pipeline. `--csv` writes one row per picture for your own analysis: `camera` (the slot), `arrival_us` (Unix
+microseconds; in grid mode the picture's time in the recording), `frame_camera` and `frame` from the code,
+`capture_us` (Unix microseconds: the code carries the low 48 bits, camcheck adds the rest from its own clock, which
+is unambiguous within four years) and `error` for an unreadable picture. `--json` writes the summary.
 
 ## Testing advice
 
