@@ -128,7 +128,7 @@ camfarm --cameras 32 --width 1280 --height 720 --fps 15 --codec h264 --bitrate-k
 | `--cameras N`, `--first-id K` | camera count and the id of the first one; ids go up to 255 (use different ranges on several machines) |
 | `--width`, `--height`, `--fps` | picture size and frame rate |
 | `--codec h264\|h265\|mjpeg` | camera codec |
-| `--bitrate-kbps`, `--vbr`, `--gop-s` | rate control (CBR by default) and key-frame interval |
+| `--bitrate-kbps`, `--vbr`, `--gop-s` | rate control (CBR by default; the software encoders x264enc and x265enc ignore `--vbr`) and key-frame interval |
 | `--jpeg-quality` | MJPEG quality |
 | `--noise` | white noise amplitude in luma levels; raise it for high bitrates |
 | `--phase spread\|random\|aligned`, `--seed` | when each camera captures within the frame period; the seed sets the random phases and the picture content |

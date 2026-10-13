@@ -80,7 +80,7 @@ struct Args {
     /// H.265/H.264 bitrate in kbit/s
     #[arg(long, default_value_t = 2000)]
     bitrate_kbps: u32,
-    /// variable instead of constant bitrate
+    /// variable instead of constant bitrate; the software encoders (x264enc, x265enc) ignore it
     #[arg(long)]
     vbr: bool,
     /// key frame interval in seconds
