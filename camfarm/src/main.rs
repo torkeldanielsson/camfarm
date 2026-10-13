@@ -25,6 +25,8 @@ const LATE: Duration = Duration::from_millis(2);
 const PUSH_THREAD_PRIORITY: i32 = 10;
 const APPSRC_MAX_BUFFERS: u64 = 4;
 const PEAK_BITRATE_PERCENT: u64 = 120;
+/// Picture time runs back and forth over this many seconds, so the shader's f32 time keeps sub-millisecond steps.
+const PICTURE_TIME_TURN_S: f64 = 3600.0;
 
 #[derive(Clone, Copy, ValueEnum, Debug, PartialEq)]
 enum Codec {
@@ -241,6 +243,11 @@ fn cameras(a: &Args, period: Duration) -> Vec<Camera> {
         .collect()
 }
 
+fn picture_time(n: u64, fps: u32) -> f32 {
+    let t = (n as f64 / fps as f64) % (2.0 * PICTURE_TIME_TURN_S);
+    (if t < PICTURE_TIME_TURN_S { t } else { 2.0 * PICTURE_TIME_TURN_S - t }) as f32
+}
+
 fn picture_params(a: &Args, c: &Camera, n: u64, capture_us: u64) -> gen::Params {
     let geometry = framecode::Geometry::for_picture(a.width, a.height);
     gen::Params {
@@ -252,7 +259,7 @@ fn picture_params(a: &Args, c: &Camera, n: u64, capture_us: u64) -> gen::Params 
         cols: framecode::COLS,
         frame: n as u32,
         seed: (a.seed as u32) ^ c.id.wrapping_mul(2654435761),
-        time: n as f32 / a.fps as f32,
+        time: picture_time(n, a.fps),
         noise: a.noise,
         hue: (c.id as f32 * 0.618_034).fract(),
         speed: 0.3 + 0.05 * (c.id % 5) as f32,
