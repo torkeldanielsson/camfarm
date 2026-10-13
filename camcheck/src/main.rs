@@ -7,9 +7,12 @@ use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Exit status when frames were lost or a camera delivered nothing (1 is an error, 2 a bad command line).
+const EXIT_LOSS: u8 = 3;
 /// Reading goes on this long after the window, so frames captured near its end still count when they arrive late.
 const READ_TAIL: Duration = Duration::from_secs(1);
 
@@ -17,7 +20,9 @@ const READ_TAIL: Duration = Duration::from_secs(1);
 #[command(
     name = "camcheck",
     version,
-    about = "Check camfarm frame codes from RTSP, GStreamer CUDA IPC exports or a recorded grid"
+    about = "Check camfarm frame codes from RTSP, GStreamer CUDA IPC exports or a recorded grid",
+    after_help = "Exit status: 0 every expected frame arrived, 1 camcheck could not run, 2 bad command line, \
+                  3 frames were lost or a camera delivered nothing."
 )]
 struct Args {
     #[command(subcommand)]
@@ -420,7 +425,7 @@ fn pct(v: &[f64], p: f64) -> f64 {
     }
 }
 
-fn main() -> Result<()> {
+fn main() -> Result<ExitCode> {
     let args = Args::parse();
     gst::init()?;
     let cams: Vec<u32> = (args.first..args.first + args.count).collect();
@@ -429,7 +434,8 @@ fn main() -> Result<()> {
         Mode::Grid(grid) => read_grid(grid, args.warmup, &cams, &recs)?,
         _ => read_live(&args, &cams, &recs)?,
     };
-    report(&args, &cams, &recs, t_from, t_to)
+    let clean = report(&args, &cams, &recs, t_from, t_to)?;
+    Ok(if clean { ExitCode::SUCCESS } else { ExitCode::from(EXIT_LOSS) })
 }
 
 /// Reads every cell of every picture of the recording; returns the measurement window on the recording's time axis.
@@ -544,7 +550,8 @@ fn read_live(args: &Args, cams: &[u32], recs: &Arc<Vec<Mutex<Vec<Rec>>>>) -> Res
     Ok((t_from, t_from + (args.seconds * 1e6) as u64))
 }
 
-fn report(args: &Args, cams: &[u32], recs: &[Mutex<Vec<Rec>>], t_from: u64, t_to: u64) -> Result<()> {
+/// Prints the summary and writes --csv and --json; returns whether every camera delivered every expected frame.
+fn report(args: &Args, cams: &[u32], recs: &[Mutex<Vec<Rec>>], t_from: u64, t_to: u64) -> Result<bool> {
     let file_mode = matches!(args.mode, Mode::Grid(_));
     if let Some(path) = &args.csv {
         let mut out = String::from("camera,arrival_us,frame_camera,frame,capture_us,error\n");
@@ -623,7 +630,7 @@ fn report(args: &Args, cams: &[u32], recs: &[Mutex<Vec<Rec>>], t_from: u64, t_to
         std::fs::write(path, format!("[\n{}\n]\n", json.join(",\n")))
             .with_context(|| format!("cannot write {path}"))?;
     }
-    Ok(())
+    Ok(sums.iter().all(|s| s.lost == 0 && s.delivered() > 0))
 }
 
 fn json_ms(v: f64) -> String {

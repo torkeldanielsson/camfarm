@@ -23,7 +23,7 @@ for size in 1280x720 960x540 640x360 480x270 320x180; do
             ffmpeg -loglevel error -y -i "$src" -vf scale=$w:$h:flags=bicubic $enc -an "$out"
             secs=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$out")
             kbps=$(python3 -c "import os; print(round(os.path.getsize('$out') * 8 / $secs / 1000))")
-            "$camcheck" grid --file "$out" --cameras 1 --cols 1 --cell-w $w --cell-h $h --warmup 0 --csv "$work/r.csv" > /dev/null
+            "$camcheck" grid --file "$out" --cameras 1 --cols 1 --cell-w $w --cell-h $h --warmup 0 --csv "$work/r.csv" > /dev/null || [ $? -eq 3 ]
             python3 -c "
 import csv
 rows = list(csv.DictReader(open('$work/r.csv')))

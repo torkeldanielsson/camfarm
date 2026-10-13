@@ -191,6 +191,10 @@ Output, per camera and in total: received fps, expected frames, lost, repeated, 
 newer one), unreadable, wrong camera, delivered %, and latency median / p95 (see the column list below).
 GStreamer errors, such as a camera that refuses the connection or a missing decoder, are printed as they happen. A
 camera without a single readable picture shows 0.00 % and makes the worst camera 0.00 %.
+camcheck exits with 0 when every camera delivered every expected frame, 3 when frames were lost or a camera
+delivered nothing, 1 when it could not run at all (an unreadable recording, for example) and 2 for a bad command
+line, so a script can tell a clean run from a lossy one.
+
 Latency is arrival minus the capture time in the code, so the camera machine and the checking machine need
 synchronized clocks (NTP or PTP); with chrony on a LAN expect well under a millisecond of error.
 
@@ -204,8 +208,8 @@ one CUDA context.
    and, every 10 s, how many frames it pushed late or skipped. Both counts should stay at 0.
 2. **Check the cameras on their own.** From a machine on the same switch as the camera machine, run
    `camcheck rtsp --url-base rtsp://<camera host>:8554/cam --cameras 32 --seconds 60`. Expect 100.000 % delivered,
-   worst camera 100.00 % and nothing lost. If this check fails, fix the cameras or the network first; nothing
-   downstream can be judged until it passes.
+   worst camera 100.00 %, nothing lost and exit status 0. If this check fails, fix the cameras or the network first;
+   nothing downstream can be judged until it passes.
 3. **Point the pipeline under test at the cameras**, at `rtsp://<camera host>:8554/cam01` and so on.
 4. **Check what the pipeline delivers**, at the far end:
    - Use `camcheck cuda-ipc` when the pipeline hands out GStreamer CUDA IPC textures.
